@@ -7,7 +7,7 @@ class NormalTrack:
     """
     Normal Track: 基于Markowitz的权益偏向权重求解器。
 
-    目标: 最小化组合方差 (GMV) -> minimize w.T @ Sigma @ w
+    目标: 等风险贡献 (ERC) -> minimize sum((w_i * (Sigma@w)_i - target_rc)^2)
     约束: sum(w) = 1.0, 各资产上下限
     """
 
@@ -51,10 +51,12 @@ class NormalTrack:
         cov_estimator.fit(returns_5d.T)  # expects (n_samples, n_features)
         Sigma = cov_estimator.covariance_  # shape = (5, 5)
 
-        # 2. GMV 目标函数: minimize w.T @ Sigma @ w
-        def gmv_variance(w):
-            w = np.array(w)
-            return float(w @ Sigma @ w)
+        # 2. ERC 目标函数: minimize sum((w_i * (Sigma@w)_i - target_rc)^2)
+        def objective_risk_parity(w, cov_matrix):
+            cov_w = np.dot(cov_matrix, w)
+            risk_contribution = w * cov_w
+            target_rc = np.dot(w.T, cov_w) / len(w)
+            return float(np.sum((risk_contribution - target_rc) ** 2))
 
         # 3. 约束: sum(w) = 1.0
         constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
@@ -67,8 +69,9 @@ class NormalTrack:
 
         # 6. SLSQP 求解
         result = minimize(
-            gmv_variance,
+            objective_risk_parity,
             w0,
+            args=(Sigma,),
             method="SLSQP",
             bounds=bounds_list,
             constraints=constraints,
