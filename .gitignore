@@ -1,0 +1,27 @@
+# Coordinator system configuration (runtime state)
+.dev-check-report.txt
+.openclaw/
+
+# Agent identity & prompt files (system-level configuration)
+AGENTS.md
+BOOTSTRAP.md
+HEARTBEAT.md
+IDENTITY.md
+SOUL.md
+TOOLS.md
+USER.md
+
+# Ephemeral memory & logs
+memory/
+*.log
+
+# Coordinator automation scripts (runtime utilities)
+scripts/
+
+# ============================================================
+# Quant model artifacts (DVC-tracked externally)
+# ============================================================
+*.pth
+*.h5
+*.pkl
+model_checkpoints/

@@ -29,7 +29,6 @@ data_pipeline:
       password: ""
       database: "etf"
     etf_codes:
-      # 对应轨A的ETF标的
       - "510300.SH"   # 沪深300ETF
       - "512850.SH"   # 中证1000ETF
       - "511010.SH"   # 国债ETF
@@ -37,30 +36,68 @@ data_pipeline:
       - "160217.SZ"   # 商品ETF
 
 features:
-  # 资产特征窗口 (5资产 × 4特征)
   asset:
     momentum_window: 20       # momentum_20d
     volatility_window: 20     # volatility_20d
     corr_window: 20            # mean_corr_20d
-    return_window: 5           # weekly_return (5 trading days)
+    return_window: 5           # weekly_return
 
-  # 宏观特征窗口
   macro:
     flow_window: 20           # 北向资金滚动窗口
 
-  # Z-score 标准化窗口
   normalization:
     zscore_window: 252        # 252交易日 [t-252, t-1]
     min_periods: 60           # 最小样本数
+
+# ============================================================
+# 模型配置
+# ============================================================
+model:
+  regime_autoencoder:
+    input_dim: 25
+    latent_dim: 6
+    hidden_dim: 16
+    leakyrelu_negative_slope: 0.01
+
+# ============================================================
+# WFO训练配置
+# ============================================================
+wfo:
+  burn_in:
+    phase1_weeks: 104      # 基座初始化
+    phase2_weeks: 52       # MAD标尺铸造
+    volatility_percentile: 0.75  # 波动率过滤分位数
+  retrain:
+    lookback_weeks: 104    # 季度重训窗口
+  weights_path: "models/ae_weights_{year}Q{quarter}.pth"
+
+# ============================================================
+# 训练超参
+# ============================================================
+training:
+  phase1_epochs: 50
+  retrain_epochs: 30
+  lr: 0.001
+  batch_size: 32
+
+# ============================================================
+# 推断配置
+# ============================================================
+inference:
+  ema_alpha: 0.05         # EMA平滑系数
+  zscore_window: 52       # Rolling Z-score窗口（52周=1年）
+  mad_safe_floor: 0.05   # MAD底层物理防线
+  clip_min: -5.0          # RL状态截断下界
+  clip_max: 5.0            # RL状态截断上界
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-loop"
+name = "ae-llm-rl-fof"
 version = "0.1.0"
-description = "Agent Loop implementation for workspace-coder"
+description = "Regime Anchor Autoencoder for Macro Regime Perception"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -69,6 +106,7 @@ dependencies = [
     "quantchdb>=0.1.11",
     "pandas",
     "numpy",
+    "torch>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -87,7 +125,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["agent"]
+source = ["src"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",
