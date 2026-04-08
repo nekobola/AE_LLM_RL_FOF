@@ -7,7 +7,7 @@ class NormalTrack:
     """
     Normal Track: 基于Markowitz的权益偏向权重求解器。
 
-    目标: 最大化夏普比率 -> 最小化负夏普比率
+    目标: 最小化组合方差 (GMV) -> minimize w.T @ Sigma @ w
     约束: sum(w) = 1.0, 各资产上下限
     """
 
@@ -51,30 +51,23 @@ class NormalTrack:
         cov_estimator.fit(returns_5d.T)  # expects (n_samples, n_features)
         Sigma = cov_estimator.covariance_  # shape = (5, 5)
 
-        # 2. 预期收益率 (日均)
-        mu = returns_5d.mean(axis=1)  # shape = (5,)
-
-        # 3. 夏普比率目标函数 (负数 -> 最小化即最大化)
-        def neg_sharpe(w):
+        # 2. GMV 目标函数: minimize w.T @ Sigma @ w
+        def gmv_variance(w):
             w = np.array(w)
-            port_return = w @ mu
-            port_vol = np.sqrt(w @ Sigma @ w)
-            if port_vol < 1e-12:
-                return 0.0
-            return -port_return / port_vol
+            return float(w @ Sigma @ w)
 
-        # 4. 约束: sum(w) = 1
+        # 3. 约束: sum(w) = 1.0
         constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
 
-        # 5. 边界
+        # 4. 边界
         bounds_list = [self.bounds[i] for i in range(5)]
 
-        # 6. 初始猜测 (等权)
+        # 5. 初始猜测 (等权)
         w0 = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
 
-        # 7. SLSQP 求解
+        # 6. SLSQP 求解
         result = minimize(
-            neg_sharpe,
+            gmv_variance,
             w0,
             method="SLSQP",
             bounds=bounds_list,
