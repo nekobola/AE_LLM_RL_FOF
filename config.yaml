@@ -1,0 +1,124 @@
+agent:
+  model: "claude-sonnet-4-20250514"
+  max_iterations: 10
+  max_context_tokens: 100000
+  temperature: 0.7
+  timezone: "Asia/Shanghai"
+  workspace_path: "."
+
+# ============================================================
+# AE_LLM_RL_FOF: 量化因子特征配置
+# ============================================================
+
+data_pipeline:
+  track_a:
+    start_date: "2015-01-01"
+    indices:
+      - "000300.SH"   # 沪深300
+      - "000852.SH"   # 中证1000
+      - "CBA02701.CS" # 信用债指数
+      - "AU9999.SGE"  # 黄金现货
+      - "NH0100.NHF"  # 南华商品指数
+
+  track_b:
+    start_date: "2022-01-01"
+    db_config:
+      host: "localhost"
+      port: 9000
+      user: "default"
+      password: ""
+      database: "etf"
+    etf_codes:
+      # 对应轨A的ETF标的
+      - "510300.SH"   # 沪深300ETF
+      - "512850.SH"   # 中证1000ETF
+      - "511010.SH"   # 国债ETF
+      - "518880.SH"   # 黄金ETF
+      - "160217.SZ"   # 商品ETF
+
+features:
+  # 资产特征窗口 (5资产 × 4特征)
+  asset:
+    momentum_window: 20       # momentum_20d
+    volatility_window: 20     # volatility_20d
+    corr_window: 20            # mean_corr_20d
+    return_window: 5           # weekly_return (5 trading days)
+
+  # 宏观特征窗口
+  macro:
+    flow_window: 20           # 北向资金滚动窗口
+
+  # Z-score 标准化窗口
+  normalization:
+    zscore_window: 252        # 252交易日 [t-252, t-1]
+    min_periods: 60           # 最小样本数
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-loop"
+version = "0.1.0"
+description = "Agent Loop implementation for workspace-coder"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml",
+    "akshare>=1.0",
+    "quantchdb>=0.1.11",
+    "pandas",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "ruff>=0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["agent"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+]
+ignore = [
+    "E501",
+    "B008",
+    "C901",
+    "UP008",
+]
