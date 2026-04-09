@@ -106,6 +106,23 @@ reward_function:
 state_assembler:
   sharpe_clip_low: -3.0   # hard clip lower bound for port_sharpe_20d
   sharpe_clip_high: 3.0   # hard clip upper bound
+
+# ============================================================
+# PPO Meta-Controller
+# ============================================================
+ppo:
+  clip_epsilon: 0.2       # PPO clip range ε
+  c_entropy: 0.01          # entropy bonus coefficient (encourages exploration)
+  c_vf: 1.0                # value function loss coefficient
+  lr: 0.0003               # Adam learning rate
+  gamma: 0.99              # TD discount factor
+  gae_lambda: 0.95         # GAE smoothing parameter (bias-variance tradeoff)
+  buffer_size: 100         # T: rollout steps per epoch (≈2 years weekly)
+  mini_batch_size: 32      # mini-batch size for SGD
+  k_epochs: 4              # number of SGD epochs per buffer
+  max_grad_norm: 0.5       # gradient clipping threshold
+  state_dim: 10            # state dimensionality (matches StateAssembler output)
+  action_dim: 2            # action dimensionality (Δα, Δτ)
   batch_size: 32
 
 # ============================================================
