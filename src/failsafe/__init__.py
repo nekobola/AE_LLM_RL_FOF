@@ -1,1 +1,4 @@
-# Failsafe module for AE_LLM_RL_FOF
+"""Failsafe Module
+
+Engineering safety and disaster recovery mechanisms.
+"""
