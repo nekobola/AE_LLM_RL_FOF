@@ -78,6 +78,34 @@ training:
   phase1_epochs: 50
   retrain_epochs: 30
   lr: 0.001
+
+# ============================================================
+# MDP Environment (PPO Agent Interaction)
+# ============================================================
+env:
+  tau_min: 0.0          # threshold lower bound
+  tau_max: 1.0          # threshold upper bound
+  initial_alpha: 0.5    # fusion ratio at episode start
+  initial_tau: 0.5      # threshold at episode start
+  episode_max_steps: 252  # one trading year per episode
+
+action_mapper:
+  alpha_min: -0.5       # max weekly cut: 50% equity (2-week full exit)
+  alpha_max:  0.1       # max weekly add: 10% (anti-chase)
+  tau_delta_range: 0.1  # symmetric threshold delta ±0.1
+
+regret_engine:
+  ema_decay: 0.8        # EMA smoothing: heavily weight history
+
+reward_function:
+  lambda_turnover: 0.001   # turnover penalty coefficient
+  lambda_te: 0.005         # tracking error penalty (normal regime)
+  kappa: 2.0               # max-drawdown penalty (event regime) — NOT gamma
+  eta: 1.0                 # regret penalty (event regime)
+
+state_assembler:
+  sharpe_clip_low: -3.0   # hard clip lower bound for port_sharpe_20d
+  sharpe_clip_high: 3.0   # hard clip upper bound
   batch_size: 32
 
 # ============================================================
