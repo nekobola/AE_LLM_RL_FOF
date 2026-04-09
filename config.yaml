@@ -135,6 +135,66 @@ inference:
   clip_min: -5.0          # RL状态截断下界
   clip_max: 5.0            # RL状态截断上界
 
+# ============================================================
+# LLM Engine
+# ============================================================
+llm:
+  api_key: "${OPENAI_API_KEY}"   # 从环境变量读取
+  model: "gpt-4o-mini"
+  max_retries: 3
+  batch_concurrency: 5          # 并发LLM调用数
+
+# ============================================================
+# 路径配置
+# ============================================================
+paths:
+  data_raw: "data/raw"
+  data_processed: "data/processed"
+  checkpoints: "checkpoints"
+  logs: "logs"
+  llm_cache: "data/llm_cache"    # LLM评分缓存(SQLite)
+  wfo_results: "results/wfo"
+  tearsheet: "results/tearsheet"
+
+# ============================================================
+# 执行脚本全局开关
+# ============================================================
+run_data_etl:
+  start_date: "2015-01-01"
+  end_date: null             # null = 今天
+  force_rebuild: false       # true=强制全量重算
+
+run_llm_batch:
+  start_week: "2022-01-01"
+  end_date: null
+  concurrency: 5
+  checkpoint_db: "data/llm_cache/llm_scores.db"
+
+train_ae:
+  epochs: 50
+  batch_size: 256
+  val_split: 0.2
+  checkpoint_path: "checkpoints/ae_weights.pth"
+  scaler_path: "checkpoints/ae_scaler.pkl"
+
+train_ppo:
+  total_timesteps: 100000
+  buffer_size: 100
+  k_epochs: 4
+  tb_log_dir: "logs/tensorboard"
+  checkpoint_path: "checkpoints/actor_critic.pth"
+
+run_backtest_wfo:
+  start_date: "2015-01-01"
+  end_date: null
+  lookback_weeks: 104        # WFO滚动窗口
+  output_dir: "results/wfo"
+
+run_inference_live:
+  checkpoint_ae: "checkpoints/ae_weights.pth"
+  checkpoint_ppo: "checkpoints/actor_critic.pth"
+  output_file: "results/target_weights.json"
+
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
