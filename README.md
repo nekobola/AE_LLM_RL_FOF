@@ -2,7 +2,6 @@
 
 > 架构解耦、动态路由的 FOF 智能体工作流 —— Autoencoder 感知宏观压迫感，LLM 降维充当特征工程与风险阻断器，PPO 升维为系统超参数调度的元控制器。
 
-设计文档: [飞书 Wiki](https://mcnx64hcm9yb.feishu.cn/wiki/OW5NwsH8rinjrQkN99UcOwH3nHd)
 
 ---
 
