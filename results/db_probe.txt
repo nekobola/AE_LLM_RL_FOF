@@ -1,0 +1,100 @@
+================================================================================
+  ClickHouse 数据探测报告
+  数据库: etf
+  生成时间: 2026-04-10 15:00:45
+================================================================================
+
+[STAT] 汇总
+   总表数: 2
+   已探测: 2
+
+[DATE] 数据时间范围
+   最早记录: 2004-12-30
+   最新记录: 2026-04-09
+
+--------------------------------------------------------------------------------
+📋 表详情
+--------------------------------------------------------------------------------
+
+  ┌────────────────────────────────────────────────────────────────────────────┐
+  │ TABLE: etf_day                                                            │
+  ├────────────────────────────────────────────────────────────────────────────┤
+  │ 行数: 1,423,304                                                            │
+  │ 时间范围: 2005-02-23 ~ 2026-04-09                                        │
+  │ 日期列: date                                                              │
+  │ 字段数: 12                                                               │
+  └────────────────────────────────────────────────────────────────────────────┘
+     字段列表:
+     列名                             数据类型                       Nullable 默认值
+     ------------------------------ ------------------------- -------- --------------------
+     code                           String                             
+     date                           Date                               
+     open                           Float32                            
+     high                           Float32                            
+     low                            Float32                            
+     close                          Float32                            
+     pre_close                      Float32                            
+     change                         Float32                            
+     pct_chg                        Float32                            
+     vol                            Float32                            
+     amount                         Float32                            
+     adj_factor                     Float32                            
+
+
+  ┌────────────────────────────────────────────────────────────────────────────┐
+  │ TABLE: etf_info_update                                                    │
+  ├────────────────────────────────────────────────────────────────────────────┤
+  │ 行数: 3,213                                                                │
+  │ 时间范围: 2004-12-30 ~ 2026-04-08                                        │
+  │ 日期列: InceptionDate                                                     │
+  │ 字段数: 46                                                               │
+  └────────────────────────────────────────────────────────────────────────────┘
+     字段列表:
+     列名                             数据类型                       Nullable 默认值
+     ------------------------------ ------------------------- -------- --------------------
+     MasterFundCode                 String                             
+     FullName                       String                             
+     InceptionDate                  Date                               
+     FundID                         Nullable(String)                   
+     FundCompanyID                  Nullable(String)                   
+     FundCompanyName                Nullable(String)                   
+     CustodianID                    Nullable(String)                   
+     Custodian                      Nullable(String)                   
+     OverseasconsultorID            Nullable(String)                   
+     Overseasconsultor              Nullable(String)                   
+     CustodianNameID                Nullable(String)                   
+     CustodianName                  Nullable(String)                   
+     AccountingFirmID               Nullable(String)                   
+     AccountingFirmName             Nullable(String)                   
+     Accountant                     Nullable(String)                   
+     LawFirmID                      Nullable(String)                   
+     LawFirmName                    Nullable(String)                   
+     Lawyer                         Nullable(String)                   
+     ManagementFee                  Nullable(Float32)                  
+     CustodianFee                   Nullable(Float32)                  
+     InvestmentGoal                 Nullable(String)                   
+     InvestmentScope                Nullable(String)                   
+     Benchmark                      Nullable(String)                   
+     RiskDescription                Nullable(String)                   
+     Strategy                       Nullable(String)                   
+     GuaranteePeriod                Nullable(String)                   
+     InceptionTNA                   Nullable(Float64)                  
+     InceptionShares                Nullable(Float64)                  
+     Fundstatus                     Nullable(String)                   
+     FundTypeID                     Nullable(String)                   
+     FundType                       Nullable(String)                   
+     CategoryID                     Nullable(String)                   
+     Category                       Nullable(String)                   
+     InvestmentStyle                Nullable(String)                   
+     IsETF                          Nullable(UInt8)                    
+     IsLOF                          Nullable(UInt8)                    
+     IsQDII                         Nullable(UInt8)                    
+     IsUmbrella                     Nullable(UInt8)                    
+     IsIndexFund                    Nullable(UInt8)                    
+     Structrued                     Nullable(UInt8)                    
+     IsInnovative                   Nullable(UInt8)                    
+     IsActiveOrPassive              Nullable(UInt8)                    
+     ShortFinancing                 Nullable(UInt8)                    
+     BackGround                     Nullable(UInt8)                    
+     TransExplanation               Nullable(String)                   
+     ETFCategory                    Nullable(String)                   

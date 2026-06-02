@@ -1,0 +1,504 @@
+{
+  "metadata": {
+    "database": "etf",
+    "probed_at": "2026-04-10T15:00:45.164928",
+    "total_tables": 2,
+    "probed_tables": 2,
+    "earliest_record": "2004-12-30",
+    "latest_record": "2026-04-09"
+  },
+  "tables": {
+    "etf_day": {
+      "row_count": 1423304,
+      "column_count": 12,
+      "date_columns": [
+        "date"
+      ],
+      "time_range": {
+        "min": "2005-02-23",
+        "max": "2026-04-09",
+        "status": "ok"
+      },
+      "columns": [
+        {
+          "column_name": "code",
+          "data_type": "String",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 1,
+          "comment": "ETF代码"
+        },
+        {
+          "column_name": "date",
+          "data_type": "Date",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 1,
+          "comment": "交易日期"
+        },
+        {
+          "column_name": "open",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "开盘价(元)"
+        },
+        {
+          "column_name": "high",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "最高价(元)"
+        },
+        {
+          "column_name": "low",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "最低价(元)"
+        },
+        {
+          "column_name": "close",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "收盘价(元)"
+        },
+        {
+          "column_name": "pre_close",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "昨收盘价(元)"
+        },
+        {
+          "column_name": "change",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "涨跌额(元)"
+        },
+        {
+          "column_name": "pct_chg",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "涨跌幅(%)"
+        },
+        {
+          "column_name": "vol",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "成交量(手)"
+        },
+        {
+          "column_name": "amount",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "成交额(千元)"
+        },
+        {
+          "column_name": "adj_factor",
+          "data_type": "Float32",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金复权因子"
+        }
+      ]
+    },
+    "etf_info_update": {
+      "row_count": 3213,
+      "column_count": 46,
+      "date_columns": [
+        "InceptionDate"
+      ],
+      "time_range": {
+        "min": "2004-12-30",
+        "max": "2026-04-08",
+        "status": "ok"
+      },
+      "columns": [
+        {
+          "column_name": "MasterFundCode",
+          "data_type": "String",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 1,
+          "comment": "基金主代码"
+        },
+        {
+          "column_name": "FullName",
+          "data_type": "String",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金全称"
+        },
+        {
+          "column_name": "InceptionDate",
+          "data_type": "Date",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "成立日期"
+        },
+        {
+          "column_name": "FundID",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金ID，10+自增长序列"
+        },
+        {
+          "column_name": "FundCompanyID",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金管理公司ID"
+        },
+        {
+          "column_name": "FundCompanyName",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金管理公司名称"
+        },
+        {
+          "column_name": "CustodianID",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "托管人ID"
+        },
+        {
+          "column_name": "Custodian",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "托管人名称"
+        },
+        {
+          "column_name": "OverseasconsultorID",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "境外投资顾问ID"
+        },
+        {
+          "column_name": "Overseasconsultor",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "境外投资顾问"
+        },
+        {
+          "column_name": "CustodianNameID",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "境外资产托管人ID"
+        },
+        {
+          "column_name": "CustodianName",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "境外资产托管人"
+        },
+        {
+          "column_name": "AccountingFirmID",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "会计师事务所ID"
+        },
+        {
+          "column_name": "AccountingFirmName",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "会计师事务所名称"
+        },
+        {
+          "column_name": "Accountant",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "经办会计师"
+        },
+        {
+          "column_name": "LawFirmID",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "律师事务所ID"
+        },
+        {
+          "column_name": "LawFirmName",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "律师事务所名称"
+        },
+        {
+          "column_name": "Lawyer",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "经办律师"
+        },
+        {
+          "column_name": "ManagementFee",
+          "data_type": "Nullable(Float32)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "管理费率(%)"
+        },
+        {
+          "column_name": "CustodianFee",
+          "data_type": "Nullable(Float32)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "托管费率(%)"
+        },
+        {
+          "column_name": "InvestmentGoal",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "投资目标"
+        },
+        {
+          "column_name": "InvestmentScope",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "投资范围"
+        },
+        {
+          "column_name": "Benchmark",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "业绩比较基准"
+        },
+        {
+          "column_name": "RiskDescription",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "风险收益特征"
+        },
+        {
+          "column_name": "Strategy",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "投资策略"
+        },
+        {
+          "column_name": "GuaranteePeriod",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "保本期"
+        },
+        {
+          "column_name": "InceptionTNA",
+          "data_type": "Nullable(Float64)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金成立规模"
+        },
+        {
+          "column_name": "InceptionShares",
+          "data_type": "Nullable(Float64)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金成立时份额"
+        },
+        {
+          "column_name": "Fundstatus",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金状态"
+        },
+        {
+          "column_name": "FundTypeID",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金运作方式ID"
+        },
+        {
+          "column_name": "FundType",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金运作方式"
+        },
+        {
+          "column_name": "CategoryID",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金类别ID"
+        },
+        {
+          "column_name": "Category",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金类别"
+        },
+        {
+          "column_name": "InvestmentStyle",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "投资风格"
+        },
+        {
+          "column_name": "IsETF",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "是否ETF"
+        },
+        {
+          "column_name": "IsLOF",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "是否LOF"
+        },
+        {
+          "column_name": "IsQDII",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "是否QDII"
+        },
+        {
+          "column_name": "IsUmbrella",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "是否伞型基金"
+        },
+        {
+          "column_name": "IsIndexFund",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "是否指数基金"
+        },
+        {
+          "column_name": "Structrued",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "是否分级基金"
+        },
+        {
+          "column_name": "IsInnovative",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "是否创新型基金"
+        },
+        {
+          "column_name": "IsActiveOrPassive",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "主动标识"
+        },
+        {
+          "column_name": "ShortFinancing",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "短期理财标识"
+        },
+        {
+          "column_name": "BackGround",
+          "data_type": "Nullable(UInt8)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "公司背景"
+        },
+        {
+          "column_name": "TransExplanation",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "基金转型说明"
+        },
+        {
+          "column_name": "ETFCategory",
+          "data_type": "Nullable(String)",
+          "default_kind": "",
+          "default_value": "",
+          "is_primary_key": 0,
+          "comment": "ETF基金类型"
+        }
+      ]
+    }
+  }
+}
