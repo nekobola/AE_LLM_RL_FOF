@@ -2,6 +2,7 @@
 
 > 架构解耦、动态路由的 FOF 智能体工作流 —— Autoencoder 感知宏观压迫感，LLM 降维充当特征工程与风险阻断器，PPO 升维为系统超参数调度的元控制器。
 
+设计文档: [飞书 Wiki](https://mcnx64hcm9yb.feishu.cn/wiki/OW5NwsH8rinjrQkN99UcOwH3nHd)
 
 ---
 
@@ -95,7 +96,7 @@
  │                             │  │                          │  │                      │
  │  LedoitWolf 协方差收缩       │  │  三原型 softmax 混合:     │  │  Actor: 10→64→64→2  │
  │  ERC 等风险贡献优化(SLSQP)   │  │  Crisis / Reflation      │  │  Critic:10→64→64→1  │
- │  bounds: 各资产[5%-60%]     │  │  / Growth                │  │  正交初始化          │
+ │  各资产差异化上限             │  │  / Growth                │  │  正交初始化          │
  │                             │  │                          │  │                      │
  │  → W_Normal (5维)           │  │  LLM信号 + 资产波动率     │  │  GAE(γ=0.99,λ=0.95) │
  │    防御权重向量              │  │  → W_Event (5维)         │  │  Clip(ε=0.2) K=4    │
@@ -103,8 +104,8 @@
  └──────────────┬──────────────┘  └────────────┬─────────────┘  └──────────┬───────────┘
                 │                              │                            │
                 │                              │               ActionMapper │
-                │                              │               a1→Δα[-0.5,+0.1]         │
-                │                              │               a2→Δτ[-0.1,+0.1]         │
+                │                              │               a1→Δα [-0.5,+0.5]      │
+                │                              │               a2→Δτ [-2.0,+2.0]      │
                 │                              │                            │
                 │                              │                    α_new, τ_new        │
                 │                              │                            │
@@ -160,17 +161,6 @@
 
 ---
 
-- **AE (Regime AutoEncoder)**: 将 25 维宏观/资产特征压缩为 6 维潜在表征，通过重建误差 $E_t = ||X - \hat{X}||^2$ 量化"宏观压迫感"，作为市场异变的连续探测器。
-- **LLM (大语言模型)**: 批量读取政策文本、市场新闻，输出 d1(流动性顺风)、d2(资金情绪)、d3(风险压力指数) 三组语义评分，充当可解释的宏观特征工程与尾部风险一票否决。
-- **PPO (元控制器)**: 不直接选基，不直接生成下单权重，只输出两个标量——融合系数 α(攻防比) 和 门控阈值 τ(牛熊切换灵敏度)，使 RL 从高维动作空间降维为超参数调度问题。
-
-**融合机制**: `w_final = α · w_event + (1-α) · w_normal`
-- α > 0.5: 倾向进攻轨 (EventTrack)，LLM 信号驱动弹性配置
-- α < 0.5: 倾向防御轨 (NormalTrack)，协方差加权防守配置
-- Veto Switch: 当任意概念 d3 > 85，一票否决，强制降权
-
----
-
 ## 目录结构
 
 ```
@@ -192,7 +182,7 @@ AE_LLM_RL_FOF-main/
 ├── src/
 │   ├── features/                # 特征工程
 │   │   ├── asset_features.py    # 资产特征 (动量/波动率/相关性/周收益)
-│   │   ├── macro_features.py    # 宏观特征 (DR007/汇率/国债/利差/北向)
+│   │   ├── macro_features.py    # 宏观特征 (DR007/汇率/国债/利差/两融动量)
 │   │   ├── normalizer.py        # 防穿越 Z-score 标准化
 │   │   └── reconstruction_error.py  # AE 重建误差计算
 │   │
@@ -382,9 +372,15 @@ python scripts/run_inference_live.py --week-end 2025-06-06
 - **a₁ → Δα**: 攻防切换增量 (α ∈ [0, 1])
 - **a₂ → Δτ**: 牛熊阈值增量 (τ ∈ [5, 50])
 
-### 复合奖励函数
+### 复合奖励函数 (牛熊双轨条件分支)
 
-$$R_t = \underbrace{r_{rel}(t)}_{\text{相对收益}} + \lambda_{end} \cdot r_{end}(t) - \lambda_{turnover} \cdot C_{TO}(t) - \lambda_{TE} \cdot TE(t) - \lambda_{mdd} \cdot \kappa \cdot MDD(t) \pm \text{SwitchBonus}$$
+**Bull 轨** (`ae_error < τ`, 正常市场):
+$$R_t = r_{port} - \lambda_{to} \cdot C_{TO} - \lambda_{TE} \cdot TE - \lambda_{end} \cdot |\alpha - 0.5| - 0.01 \cdot |\Delta\alpha| \pm \text{SwitchBonus}$$
+
+**Bear 轨** (`ae_error ≥ τ`, 压力市场):
+$$R_t = \lambda_{rel} \cdot (r_{port} - r_{normal}) - \lambda_{to} \cdot C_{TO} - \kappa \cdot \max(0, MDD - MDD_{normal}) - \lambda_{end} \cdot |\alpha - 0.5| - 0.01 \cdot |\Delta\alpha| \pm \text{SwitchBonus}$$
+
+**SwitchBonus**: α>0.5且regime=bull → +0.45; α<0.5且regime=bear → +0.45; α>0.5且regime=bear → -0.15; α<0.5且regime=bull → -0.15
 
 ### 5 资产类别
 
@@ -477,9 +473,9 @@ pytest tests/ -v
 | 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
 |------|-----------------|---------|---------|-----------|
 | 5.1 状态组装 | 10个原始信号: ae_error, vol_mkt_20d, llm_macro/sentiment/risk, port_sharpe, mdd, regret_ema, tau_prev, alpha_prev | `StateAssembler.assemble()` → AE Z-score标准化, vol MinMax→[0,1], llm (x-50)/50→[-1,1], d3三阶段异常清洗(滚动中位数/周变化上限/硬截断), Sharpe硬截断[-3,3] | `S_t` shape (10,) np.float32 | Actor-Critic网络 |
-| 5.2 动作映射 | Actor输出 (a1, a2) ∈ [-1,1]² | `ActionMapper.map()` → **非对称映射**: Δα: [-1,1]→[-0.5, 0.1] (砍仓快/加仓慢) + bias; Δτ: [-1,1]→[-0.1, 0.1] (对称) | `(Δα, Δτ)` | 5.3 环境step |
+| 5.2 动作映射 | Actor输出 (a1, a2) ∈ [-1,1]² | `ActionMapper.map()` → Δα: [-1,1]→[-0.5, 0.5] + bias; Δτ: [-1,1]→[-2.0, 2.0] (config: alpha_max=0.5, tau_delta_range=2.0) | `(Δα, Δτ)` | 5.3 环境step |
 | 5.3 环境step | live_data注入 (ae_error/vol/llm/returns/w_normal/w_event) + action (a1,a2) | `MDPEnvironment.step()` → action→Δα/Δτ→α_new/τ_new → w_final融合 → r_port计算 → reward计算 → 状态更新 → next_state组装 | `(next_state, reward, terminated, truncated, info)` | PPO Trainer (rollout收集) |
-| 5.4 复合奖励 | r_port, w_final_t, w_final_{t-1}, port_returns, bench_returns, equity_curve, regret_ema, regime_bull | `RewardFunction.compute()` → **牛熊双轨**: Bull(ae_error<τ): TE惩罚; Bear: 相对收益+MDD差惩罚 + turnover成本 + endpoint惩罚(α偏离0.5) + SwitchBonus(方向正确奖励/错误惩罚) + 一致性nudge | 标量 reward (float) | GAE优势估计 |
+| 5.4 复合奖励 | r_port, w_final_t, w_final_{t-1}, port_returns, bench_returns, equity_curve, normal_return_t, normal_equity_curve, alpha, regime_bull | `RewardFunction.compute()` → **牛熊双轨**: Bull(ae_error<τ): r_port − λ_to·turnover − λ_te·TE; Bear: λ_rel·(r_port−r_normal) − λ_to·turnover − κ·max(0,MDD−MDD_normal); 共同: −λ_end·|α−0.5| − 0.01·|Δα| + SwitchBonus(±0.45/±0.15) | 标量 reward (float) | GAE优势估计 |
 | 5.5 遗憾引擎 | w_final_prev (5,) + period_return (5,) | `RegretEngine.compute()` → 16个专家候选库 (含逆波动率/纯现金/纯黄金/纯债券/grid组合) → max(r_opt - r_actual, 0) → EMA(0.8)平滑 → 历史max归一化 | `(regret_ema, regret_ema_norm)` ∈ [0,1] | StateAssembler (s7) |
 | 5.6 指标工具 | port_returns, bench_returns, equity_curve | `calculate_sharpe_ratio()` / `calculate_current_drawdown()` / `calculate_tracking_error()` | Sharpe / MDD / TE (float) | StateAssembler, RewardFunction |
 
