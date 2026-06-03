@@ -374,13 +374,47 @@ python scripts/run_inference_live.py --week-end 2025-06-06
 
 ### 复合奖励函数 (牛熊双轨条件分支)
 
+奖励函数实现于 `src/env/reward_function.py`，配置位于 `config.yaml:107-118`。根据 AE 重建误差与阈值的比较，分为牛/熊两条轨道：
+
 **Bull 轨** (`ae_error < τ`, 正常市场):
 $$R_t = r_{port} - \lambda_{to} \cdot C_{TO} - \lambda_{TE} \cdot TE - \lambda_{end} \cdot |\alpha - 0.5| - 0.01 \cdot |\Delta\alpha| \pm \text{SwitchBonus}$$
 
-**Bear 轨** (`ae_error ≥ τ`, 压力市场):
+**Bear 轨** (`ae_error ≥ τ`, 压力市场 / 危机轨道):
 $$R_t = \lambda_{rel} \cdot (r_{port} - r_{normal}) - \lambda_{to} \cdot C_{TO} - \kappa \cdot \max(0, MDD - MDD_{normal}) - \lambda_{end} \cdot |\alpha - 0.5| - 0.01 \cdot |\Delta\alpha| \pm \text{SwitchBonus}$$
 
 **SwitchBonus**: α>0.5且regime=bull → +0.45; α<0.5且regime=bear → +0.45; α>0.5且regime=bear → -0.15; α<0.5且regime=bull → -0.15
+
+#### 变量定义
+
+| 变量 | config.yaml 值 | 含义 |
+|------|---------------|------|
+| `r_port` | — (实时计算) | 组合本期收益率 |
+| `r_normal` | — (实时计算) | 正常轨 (防御轨) 收益率，由 NormalTrack ERC 组合产生 |
+| `C_{TO}` (turnover) | — | `Σ|w_t - w_{t-1}|`，5 类资产权重的绝对变化之和 |
+| `TE` | — | 年化跟踪误差: `√252 × std(r_port - r_benchmark)` |
+| `MDD` | — | 组合当前回撤: `(HWM - NAV) / HWM` |
+| `MDD_{normal}` | — | 正常轨当前回撤，同 MDD 公式计算 |
+| `α` (alpha_current) | — | 攻防融合比，控制 `w_final = α·w_event + (1-α)·w_normal` |
+| `Δα` | — | `|α_t - α_{t-1}|`，alpha 跨期变化量 |
+
+#### 超参数配置
+
+| 参数 | config.yaml 值 | 类默认值 | 含义 |
+|------|---------------|---------|------|
+| `λ_turnover` | **0.001** | 0.001 | 换手率惩罚系数 |
+| `λ_te` | **0.005** | 0.005 | 跟踪误差惩罚系数 (仅 Bull 轨) |
+| `κ` (kappa) | **2.0** | 2.0 | 超额回撤惩罚系数 (仅 Bear 轨) |
+| `λ_relative` | **1.0** | 1.0 | 相对收益权重 (仅 Bear 轨) |
+| `λ_endpoint` | **0.20** | 0.10 | 端点中心化惩罚: 防止 alpha 偏离 0.5，鼓励思维融合 |
+| `0.01` | 硬编码 | 硬编码 | 一致性惩罚: 抑制 alpha 跨期剧烈跳变 |
+| `switch_bull_reward` | **0.45** | 0.010 | 牛市选择进攻的正确奖励 |
+| `switch_bear_reward` | **0.45** | 0.010 | 熊市选择防御的正确奖励 |
+| `switch_bull_penalty` | **0.15** | 0.015 | 牛市错误选择防御的惩罚 |
+| `switch_bear_penalty` | **0.15** | 0.015 | 熊市错误选择进攻的惩罚 |
+
+> **设计意图**: 牛市轨强调绝对收益 + 低跟踪误差；熊市轨 (危机轨道) 切换到相对防御基准的超额收益 + 控制超额回撤。核心思想是危机时期不要求绝对正收益，只要求跑赢防御组合且回撤不更深。端点惩罚和制度切换奖励共同防止 PPO 在两轨之间摇摆不定或走极端。
+
+> **注意**: `eta` (regret 权重) 和 `lambda_alpha_direct` 在 config 中配置为 1.0 和 0.0，但在 `compute()` 方法中当前未使用，为预留参数。
 
 ### 5 资产类别
 
@@ -610,6 +644,17 @@ pytest tests/ -v
 | 指标计算 | NAV序列 | `compute_wfo_metrics()` → 总收益/年化收益/最大回撤/Sharpe/年化波动率 | metrics.json |
 | 输出落盘 | records + gate_diagnostics | nav_series.csv + weights_trajectory.csv + weights_data_generalbt.csv + metrics.json + gate_diagnostics.csv + tearsheet.txt + figures/ | **`results/wfo/{run_id}/`** |
 | GeneralBacktest | weights_data + price_data(ClickHouse日频OHLC) | 集成GeneralBacktest: run_backtest(adj_factor, tcost=0.0003, slippage=0.0001) + plot_dashboard | 业绩图 (nav/excess/drawdown/heatmap) |
+
+### 回测交易费率与滑点
+
+回测参数硬编码在 `scripts/run_backtest_wfo.py:756-757`，调用 GeneralBacktest 时传入：
+
+| 参数 | 值 | 说明 |
+|------|------|------|
+| **交易费率 (transaction_cost)** | `[0.0003, 0.0003]` | 买入 0.03%（3‱），卖出 0.03%（3‱） |
+| **滑点 (slippage)** | `0.0001` | 0.01%（1‱） |
+
+> 当前费率设置（买卖各 3‱、滑点 1‱）在 A 股市场中属于偏低水平。实际公募 FOF 产品的申赎费通常在 0.5%~1.5% 之间，滑点也往往更高。如需调整，直接修改 `scripts/run_backtest_wfo.py` 中 `run_backtest()` 调用的 `transaction_cost` 和 `slippage` 参数即可。
 
 ### Step 6: 实盘信号下发 (`scripts/run_inference_live.py`)
 
