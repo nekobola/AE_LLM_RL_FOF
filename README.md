@@ -223,7 +223,7 @@ $$
 **异变检测原理**: 当市场进入 crisis (流动枯竭, 信用利差走阔), $X_t$ 的联合分布 $P_t$ 偏离训练分布 $P_{\text{train}}$。重建误差放大:
 
 $$
-E_t = \|X_t - \hat{X}_t\|^2 \nearrow \iff P_t \not\approx P_{\text{train}}
+E_t = \|X_t - \hat{X}_t\|^2 \uparrow \iff P_t \not\approx P_{\text{train}}
 $$
 
 设 $E_t$ 在 $P_{\text{train}}$ 下近似 $\chi^2(25)$, 则 $E_t > \chi^2_{0.99}(25) \approx 42.4$ 触发 crisis 报警 (实证: $E_t$ 中位数 ~10, P95 ~30)。
@@ -299,7 +299,7 @@ $$
 $$
 X_{T \times 5} = [\text{5-dim } f_t], \quad Y_{T \times 8} = [\text{8 ETF weekly return}]
 $$
-
+$$
 \hat{\beta} \in \mathbb{R}^{5 \times 8}, \quad \hat{\beta} = (X^\top X)^{-1} X^\top Y, \quad D_{\text{scale}} = \hat{\beta}^\top \in \mathbb{R}^{8 \times 5}
 $$
 
