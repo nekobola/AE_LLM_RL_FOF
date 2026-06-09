@@ -33,10 +33,10 @@ class TextETL:
         self.config = config
         ch_cfg = config.get("text_db", {})
         self.db_config = {
-            "host": ch_cfg.get("host", os.environ.get("CHDB_HOST", "10.13.66.5")),
+            "host": ch_cfg.get("host", os.environ.get("CHDB_HOST", "localhost")),
             "port": int(ch_cfg.get("port", os.environ.get("CHDB_PORT", 20108))),
-            "user": ch_cfg.get("user", os.environ.get("CHDB_USER", "hqy_404")),
-            "password": ch_cfg.get("password", os.environ.get("CHDB_PASSWORD", "hqy_404")),
+            "user": ch_cfg.get("user", os.environ.get("CHDB_USER", "default")),
+            "password": ch_cfg.get("password", os.environ.get("CHDB_PASSWORD", "")),
             "database": ch_cfg.get("database", os.environ.get("CHDB_DATABASE", "text_db")),
         }
         self._client: Any = None

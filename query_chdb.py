@@ -1,12 +1,14 @@
 """调查 ClickHouse 中的 ETF 数据和宏观数据"""
+import os
+
 from quantchdb import ClickHouseDatabase
 
 db = ClickHouseDatabase(config={
-    'host': '10.13.66.5',
-    'port': 20108,
-    'user': 'cufel_arena_etf_reader',
-    'password': 'cufel_arena_etf_404',
-    'database': 'etf',
+    'host': os.environ.get('CHDB_HOST', 'localhost'),
+    'port': int(os.environ.get('CHDB_PORT', '20108')),
+    'user': os.environ.get('CHDB_USER', 'default'),
+    'password': os.environ.get('CHDB_PASSWORD', ''),
+    'database': os.environ.get('CHDB_DATABASE', 'etf'),
 }, terminal_log=False, file_log=False)
 print('[OK] 成功连接 ClickHouse')
 
