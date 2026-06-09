@@ -260,7 +260,7 @@ $$
 
 直觉: $e_t$ 高说明权益类在跌 (波动率暴涨), 系统要防御; $l_t$ 高说明小盘跌得更狠, 也是熊市信号。
 
-**1.4 9 维 PPO 状态 $S_t$**
+**1.4 9 维 PPO 状态 S_t**
 
 $$
 S_t = \Phi\left(\text{ae\_err}_{t}^{\text{zscore}}, \text{vol}_{t}^{20\text{d norm}}, m_t, s_t, r_t, \text{Sharpe}_{t}^{20\text{d}}, |\text{MDD}_t|, \text{regret}_t, \theta_{t-1}^{\text{norm}}\right)
@@ -407,7 +407,7 @@ $$
 
 $$
 w(t) = \text{Proj}_\Delta(b(t)), \qquad
-\Delta = \left\{ w \in \mathbb{R}^8 : w_i \in [l_i, u_i],\; \sum_{i=1}^{8} w_i = 1 \right\}
+\Delta = \{ w \in \mathbb{R}^8 \mid w_i \in [l_i, u_i],\ \sum_{i=1}^{8} w_i = 1 \}
 $$
 
 $l_i, u_i$ 是各资产的下/上限 (见代码 `BOUNDS` 表), 保证单资产占比不会偏离合理范围。投影算法用 clip + 归一化 迭代 50 次 (Dykstra 简化版):
