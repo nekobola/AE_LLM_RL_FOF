@@ -166,16 +166,16 @@ def inject_live_data_from_history(
     else:
         returns_matrix = np.zeros((len(features_df), 5))
 
-    # ── DualTrackEngine: 预计算每日的 (w_normal_t, w_event_t) ──────────────
-    from src.compute.dual_track_engine import DualTrackEngine
-    dual_engine = DualTrackEngine(config)
-    w_normal_series = []
+    # ── Stage 7c: 单轨 V31EngineN (8 资产), PPO 控 theta. 预计算每日的 w_event_t ──────
+    from src.compute.v31_engine_n import V31EngineN
+    from src.data_pipeline.track_b.fetcher import fetch_n_etf
+    v31_engine = V31EngineN(config)
     w_event_series = []
     for i in range(len(returns_matrix)):
-        # DualTrackEngine.compute() expects (5, T)，取最近30天
+        # V31Engine.compute() expects (5, T)，取最近30天
         lookback = min(30, i)
         ret_5d = returns_matrix[max(0, i-lookback):i+1].T  # shape (5, T)
-        # 提取 LLM 信号（用于 EventTrack 进攻决策）
+        # 提取 LLM 信号
         llm_macro = llm_sentiment = llm_risk = 50.0
         if llm_scores_df is not None and not llm_scores_df.empty:
             try:
@@ -186,21 +186,71 @@ def inject_live_data_from_history(
             except Exception:
                 pass
         if ret_5d.shape[1] < 5:
-            # 数据不足，用等权填充
-            w_normal_series.append(np.array([0.2]*5))
-            w_event_series.append(np.array([0.2, 0.2, 0.2, 0.2, 0.2]))  # 进攻轨默认等权
+            # 数据不足，用等权填充 (8 资产 0.125 each)
+            w_event_series.append(np.array([0.125] * 8))
         else:
-            w_n, w_e = dual_engine.compute(
+            w_e = v31_engine.compute(
                 ret_5d,
                 llm_macro=llm_macro,
                 llm_sentiment=llm_sentiment,
                 llm_risk=llm_risk,
+                theta=0.7,  # PPO 会在 MDP 内动态调整
             )
-            w_normal_series.append(w_n)
             w_event_series.append(w_e)
-    
-    # 组合收益：等权平均
-    port_returns_series = returns_matrix.mean(axis=1)
+
+    # ── Stage 7c: 拉 8 ETF 真实 weekly returns (从 ClickHouse) ─────────────
+    # port_returns_series = dot(w_event_8d[i], etf_returns_8d[i])
+    # 之前用的是 z-scored 5 资产等权平均, 与生产 8-ETF 业绩 landscape 完全无关
+    log.info("拉取 8 ETF 真实 weekly returns (ClickHouse) ...")
+    try:
+        etf_raw = fetch_n_etf(
+            start_date=str(features_df.index.min().date()),
+            end_date=str(features_df.index.max().date()),
+            columns=["close"],
+        )
+        if not etf_raw.empty:
+            etf_pivot = etf_raw.pivot_table(
+                index="date", columns="code", values="close"
+            ).sort_index()
+            etf_weekly = etf_pivot.resample("W-FRI").last().pct_change().dropna()
+            # 8 ETF codes 与 V31EngineN.ASSET_CODES 顺序一致:
+            # 511010, 518880, 511020, 159985, 512100, 515050, 159919, 510300
+            expected_codes = [
+                "511010", "518880", "511020", "159985",
+                "512100", "515050", "159919", "510300",
+            ]
+            available_codes = [c for c in expected_codes if c in etf_weekly.columns]
+            etf_weekly = etf_weekly[available_codes].fillna(0.0)
+            # 对齐到 features_df 周频
+            etf_returns_by_date = {}
+            for week_end, row in etf_weekly.iterrows():
+                etf_returns_by_date[pd.Timestamp(week_end)] = row.values
+            log.info(f"8 ETF weekly returns: {len(etf_returns_by_date)} 周, "
+                     f"覆盖 {etf_weekly.index.min().date()} ~ {etf_weekly.index.max().date()}")
+        else:
+            etf_returns_by_date = {}
+            log.warning("8 ETF 数据为空, port_returns_series 将用 0")
+    except Exception as e:
+        etf_returns_by_date = {}
+        log.warning(f"8 ETF 拉取失败: {e}, port_returns_series 将用 0")
+
+    # 组合收益: dot(w_event_8d[t], etf_returns_8d[t])
+    # features_df 是日频, 但 8 ETF weekly returns 是周频. 对齐到 features_df 的最后一行 (周五或最近日)
+    port_returns_series = np.zeros(len(features_df))
+    for i in range(len(features_df)):
+        w_e = w_event_series[i]  # 8-dim
+        # 找 features_df[i] 之前最近的 etf weekly return
+        date_i = pd.Timestamp(features_df.index[i])
+        available = sorted([k for k in etf_returns_by_date.keys() if k <= date_i])
+        if available and w_e is not None and len(w_e) == 8:
+            etf_rets = etf_returns_by_date[available[-1]]
+            # 保证 etf_rets 长度 = 8
+            if len(etf_rets) == 8:
+                port_returns_series[i] = float(np.dot(w_e, etf_rets))
+            else:
+                port_returns_series[i] = 0.0
+        else:
+            port_returns_series[i] = 0.0
     
     # Benchmark: 第一只资产 (沪深300)
     if available_return_cols:
@@ -229,12 +279,15 @@ def inject_live_data_from_history(
     # 构建 live_data 列表
     dates = features_df.index.tolist()
     for i, date in enumerate(dates):
-        # LLM 评分
+        # LLM 评分 (带 NaN 兜底, 否则 StateAssembler 会产出 NaN state)
         if llm_scores_df is not None and date in llm_scores_df.index:
             row = llm_scores_df.loc[date]
-            llm_macro = row.get("d1", 50.0) if "d1" in row else 50.0
-            llm_sentiment = row.get("d2", 50.0) if "d2" in row else 50.0
-            llm_risk = row.get("d3", 50.0) if "d3" in row else 50.0
+            raw_d1 = row.get("d1", 50.0) if "d1" in row else 50.0
+            raw_d2 = row.get("d2", 50.0) if "d2" in row else 50.0
+            raw_d3 = row.get("d3", 50.0) if "d3" in row else 50.0
+            llm_macro = 50.0 if pd.isna(raw_d1) else float(raw_d1)
+            llm_sentiment = 50.0 if pd.isna(raw_d2) else float(raw_d2)
+            llm_risk = 50.0 if pd.isna(raw_d3) else float(raw_d3)
         else:
             llm_macro = 50.0
             llm_sentiment = 50.0
@@ -261,16 +314,28 @@ def inject_live_data_from_history(
         # 累积 equity curve 到当前
         equity_to_date = equity_curve[:i+2].tolist()
         
-        # 2×5 收益窗口：[t-1, t]，用于RegretEngine计算
+        # 5×5 收益窗口：[t-4, t]，用于V3.1.compute() (需要至少 5 天) + RegretEngine
         n_assets = returns_matrix.shape[1]
-        if i >= 1 and returns_matrix.shape[1] == n_assets:
-            ret_prev = returns_matrix[i - 1].tolist()   # t-1
-            ret_curr = returns_matrix[i].tolist()      # t
+        returns_window_5d = []
+        for k in range(max(0, i - 4), i + 1):
+            if k < len(returns_matrix) and returns_matrix.shape[1] == n_assets:
+                returns_window_5d.append(returns_matrix[k].tolist())
+            else:
+                returns_window_5d.append([0.0] * n_assets)
+        # Pad to exactly 5 days if near start
+        while len(returns_window_5d) < 5:
+            returns_window_5d.insert(0, [0.0] * n_assets)
+
+        # Stage 7c: 8 ETF 真实 weekly returns (8-dim, 给 env.step() 算 r_port)
+        date_i = pd.Timestamp(date)
+        available_etf = sorted([k for k in etf_returns_by_date.keys() if k <= date_i])
+        if available_etf:
+            asset_returns_t = list(etf_returns_by_date[available_etf[-1]])
+            if len(asset_returns_t) < 8:
+                asset_returns_t = asset_returns_t + [0.0] * (8 - len(asset_returns_t))
         else:
-            ret_prev = [0.0] * n_assets
-            ret_curr = [0.0] * n_assets
-        returns_window_5d = [ret_prev, ret_curr]
-        
+            asset_returns_t = [0.0] * 8
+
         live_data = {
             "ae_error": float(ae_errors[i]) if i < len(ae_errors) else 0.0,
             "vol_mkt_20d": vol,
@@ -280,12 +345,13 @@ def inject_live_data_from_history(
             "port_sharpe_20d": sharpe,
             "port_mdd_current": abs(mdd),  # MDD 是负值，取绝对值
             "r_port": r_port,
-            "w_normal_t": w_normal_series[i],
+            "w_normal_t": np.array([0.125] * 8),  # Stage 7c: 8 资产占位
             "w_event_t": w_event_series[i],
             "port_returns": hist_ret_window,
             "benchmark_returns": hist_bench_window,
             "equity_curve": equity_to_date,
-            "returns_window_5d": returns_window_5d,  # [t-1, t]，shape (2, 5)
+            "returns_window_5d": returns_window_5d,  # (5, T) market features 给 V3.1N
+            "asset_returns_t": asset_returns_t,  # Stage 7c: 8 ETF 真实 weekly returns
         }
         live_data_list.append(live_data)
     
@@ -314,6 +380,14 @@ def main() -> None:
     parser.add_argument("--checkpoint-path", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--resume", action="store_true", help="从checkpoint恢复训练")
+    parser.add_argument(
+        "--start-date", default=None,
+        help="训练数据起始日期 (YYYY-MM-DD), 早于此日期的 features 会被截断"
+    )
+    parser.add_argument(
+        "--end-date", default=None,
+        help="训练数据截止日期 (YYYY-MM-DD), 晚于此日期的 features 会被截断 (含)"
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -363,7 +437,19 @@ def main() -> None:
 
         log.info(f"加载特征: {features_path}")
         features_df = pd.read_parquet(features_path)
-        log.info(f"特征矩阵: {features_df.shape}")
+        log.info(f"特征矩阵(原始): {features_df.shape}, {features_df.index.min().date()} ~ {features_df.index.max().date()}")
+        # 按日期范围截断 (OOS 训练: 只用 [start-date, end-date])
+        if args.start_date:
+            sd = pd.Timestamp(args.start_date)
+            n_before = len(features_df)
+            features_df = features_df[features_df.index >= sd]
+            log.info(f"  按 --start-date={args.start_date} 截断: {n_before} -> {len(features_df)}")
+        if args.end_date:
+            ed = pd.Timestamp(args.end_date)
+            n_before = len(features_df)
+            features_df = features_df[features_df.index <= ed]
+            log.info(f"  按 --end-date={args.end_date} 截断: {n_before} -> {len(features_df)}")
+        log.info(f"训练用特征: {features_df.shape}, {features_df.index.min().date()} ~ {features_df.index.max().date()}")
         log.info("历史数据就绪，可注入环境")
     else:
         log.warning("历史特征或scaler不存在，环境将使用模拟数据")
@@ -400,7 +486,17 @@ def main() -> None:
             conn
         )
         conn.close()
-        log.info(f"LLM 评分历史: {len(llm_scores_df)} 条")
+        log.info(f"LLM 评分历史(原始): {len(llm_scores_df)} 条")
+        # 同样按训练期截断 (OOS 训练只用 [start-date, end-date])
+        if llm_scores_df is not None and not llm_scores_df.empty:
+            llm_scores_df["week_end"] = pd.to_datetime(llm_scores_df["week_end"])
+            if args.start_date:
+                sd = pd.Timestamp(args.start_date)
+                llm_scores_df = llm_scores_df[llm_scores_df["week_end"] >= sd]
+            if args.end_date:
+                ed = pd.Timestamp(args.end_date)
+                llm_scores_df = llm_scores_df[llm_scores_df["week_end"] <= ed]
+            log.info(f"  训练用 LLM 评分: {len(llm_scores_df)} 条")
     else:
         log.warning("LLM scores 数据库不存在，使用默认评分")
 
@@ -411,8 +507,8 @@ def main() -> None:
     # ── Actor-Critic ──────────────────────────────────────────────────────
     log.info("初始化 Actor-Critic 网络 ...")
     ac = ActorCritic(
-        state_dim=ppo_cfg.get("state_dim", 10),
-        action_dim=ppo_cfg.get("action_dim", 2),
+        state_dim=ppo_cfg.get("state_dim", 9),
+        action_dim=ppo_cfg.get("action_dim", 1),
         hidden_dim=64,
     ).to(device)
 
@@ -423,8 +519,8 @@ def main() -> None:
     # ── Trainer ───────────────────────────────────────────────────────────
     rollout_buffer = RolloutBuffer(
         buffer_size=buffer_size,
-        state_dim=ppo_cfg.get("state_dim", 10),
-        action_dim=ppo_cfg.get("action_dim", 2),
+        state_dim=ppo_cfg.get("state_dim", 9),
+        action_dim=ppo_cfg.get("action_dim", 1),
     )
     trainer = PPOTrainer(
         actor_critic=ac,

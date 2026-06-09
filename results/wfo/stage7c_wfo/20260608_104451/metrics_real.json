@@ -1,0 +1,17 @@
+{
+  "total_return": 0.6169586450633575,
+  "annualized_return": 0.15139629205879324,
+  "volatility_annual": 0.08156609079090885,
+  "max_drawdown": 0.0997989359230872,
+  "sharpe_ratio": 1.7677159926236248,
+  "calmar_ratio": 1.5170130889518798,
+  "sortino_ratio": 1.9917326767669141,
+  "win_rate": 0.5714285714285714,
+  "n_trades": 173.0,
+  "avg_turnover": 0.0629184308150192,
+  "cumulative_turnover": 10.759051669368285,
+  "var_95": -0.006315477309564299,
+  "cvar_95": -0.012184073076658603,
+  "n_weeks": 173,
+  "_source": "generalbacktest_real_ohlc"
+}

@@ -1,0 +1,65 @@
+{
+  "description": "Stage 7 post-refactor snapshot",
+  "files": [
+    {
+      "path": "src/compute/v31_engine.py",
+      "sha256_prefix": "db78a40c765c84b3",
+      "size": 2399
+    },
+    {
+      "path": "src/compute/event_track_v3_1.py",
+      "sha256_prefix": "1ee724b25adb65bc",
+      "size": 8985
+    },
+    {
+      "path": "src/env/action_mapper.py",
+      "sha256_prefix": "83b1552d981a874d",
+      "size": 3654
+    },
+    {
+      "path": "src/env/reward_function.py",
+      "sha256_prefix": "960b53a03d329fe6",
+      "size": 3046
+    },
+    {
+      "path": "src/env/state_assembler.py",
+      "sha256_prefix": "ed2b8a21ea187c51",
+      "size": 5957
+    },
+    {
+      "path": "src/env/mdp_environment.py",
+      "sha256_prefix": "08e813ac104c2b38",
+      "size": 9025
+    },
+    {
+      "path": "scripts/run_backtest_wfo.py",
+      "sha256_prefix": "0d159be632d6ceaa",
+      "size": 41743
+    },
+    {
+      "path": "scripts/train_ppo.py",
+      "sha256_prefix": "9b5d204c79308524",
+      "size": 23443
+    },
+    {
+      "path": "scripts/run_inference_live.py",
+      "sha256_prefix": "e008d3912165fdb1",
+      "size": 18591
+    },
+    {
+      "path": "config.yaml",
+      "sha256_prefix": "56033163515b1590",
+      "size": 3216
+    },
+    {
+      "path": "verify_stage7.py",
+      "sha256_prefix": "7200345741e7da66",
+      "size": 5880
+    },
+    {
+      "path": "checkpoints/actor_critic.pth",
+      "sha256_prefix": "f3737f1b283a949c",
+      "size": 131847
+    }
+  ]
+}

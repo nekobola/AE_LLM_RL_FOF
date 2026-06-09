@@ -1,0 +1,163 @@
+action_mapper:
+  theta_min: 0.0
+  theta_neutral: 1.0
+  theta_max: 2.0
+agent:
+  max_context_tokens: 100000
+  max_iterations: 10
+  model: claude-sonnet-4-20250514
+  temperature: 0.7
+  timezone: Asia/Shanghai
+  workspace_path: .
+data_pipeline:
+  asset_codes:
+  - 000300.SH
+  - 000852.SH
+  - CBA02701.CS
+  - AU9999.SGE
+  - NH0100.NHF
+  etf_codes:
+  - '510300'
+  - '159919'
+  - '511010'
+  - '518880'
+  - '159985'
+  etf_pools:
+    fixed_income:
+    - '511010'
+    gold:
+    - '518880'
+    money_market:
+    - '511850'
+    satellite:
+    - '159985'
+    wide_base:
+    - '510300'
+    - '159919'
+  start_date: '2005-01-01'
+  track_b:
+    db_config:
+      database: etf
+      host: ${CHDB_HOST}
+      password: ${CHDB_PASSWORD}
+      port: 20108
+      user: ${CHDB_USER}
+env:
+  episode_max_steps: 252
+  initial_theta: 1.0
+  tau_max: 50.0
+  tau_min: 5.0
+event_track_version: v3_1
+failsafe:
+  veto_d3_threshold: 85.0
+features:
+  asset:
+    corr_window: 20
+    momentum_window: 20
+    return_window: 5
+    volatility_window: 20
+  macro:
+    flow_window: 20
+inference:
+  clip_max: 5.0
+  clip_min: -5.0
+  ema_alpha: 0.05
+  mad_safe_floor: 0.05
+  zscore_window: 52
+llm:
+  api_key: ${OPENAI_API_KEY}
+  base_url: ${LLM_BASE_URL}
+  batch_concurrency: 5
+  max_retries: 3
+  model: ${MODEL_NAME}
+model:
+  regime_autoencoder:
+    hidden_dim: 16
+    input_dim: 25
+    latent_dim: 6
+    leakyrelu_negative_slope: 0.01
+normalization:
+  min_periods: 60
+  zscore_window: 252
+paths:
+  checkpoints: checkpoints
+  data_processed: data/processed
+  data_raw: data/raw
+  llm_cache: data/llm_cache
+  logs: logs
+  tearsheet: results/tearsheet
+  wfo_results: results/wfo
+ppo:
+  action_dim: 1
+  batch_size: 32
+  buffer_size: 100
+  c_entropy: 0.1
+  c_vf: 1.0
+  clip_epsilon: 0.2
+  gae_lambda: 0.95
+  gamma: 0.99
+  k_epochs: 4
+  lr: 0.0003
+  max_grad_norm: 0.5
+  mini_batch_size: 32
+  state_dim: 9
+regret_engine:
+  ema_decay: 0.8
+reward_function:
+  lambda_mdd: 2.0
+  lambda_signal: 0.01
+  lambda_theta_change: 0.005
+  lambda_turnover: 0.001
+  mdd_target: 0.05
+run_backtest_wfo:
+  end_date: null
+  lookback_weeks: 104
+  output_dir: results/wfo
+  start_date: '2015-01-01'
+run_data_etl:
+  end_date: null
+  force_rebuild: false
+  start_date: '2015-01-01'
+run_inference_live:
+  checkpoint_ae: checkpoints/ae_weights.pth
+  checkpoint_ppo: checkpoints/actor_critic.pth
+  output_file: results/target_weights.json
+run_llm_batch:
+  checkpoint_db: data/llm_cache/llm_scores.db
+  concurrency: 5
+  end_date: null
+  start_week: '2022-01-01'
+selection:
+  liquidity_min_amt: 30000000
+  momentum_window: 20
+state_assembler:
+  sharpe_clip_high: 3.0
+  sharpe_clip_low: -3.0
+  theta_max: 2.0
+  theta_min: 0.0
+text_db:
+  database: text_db
+train_ae:
+  batch_size: 256
+  checkpoint_path: checkpoints/ae_weights.pth
+  epochs: 50
+  scaler_path: checkpoints/ae_scaler.pkl
+  val_split: 0.2
+train_ppo:
+  buffer_size: 100
+  checkpoint_path: checkpoints/actor_critic.pth
+  k_epochs: 4
+  tb_log_dir: logs/tensorboard
+  total_timesteps: 100000
+training:
+  lr: 0.001
+  phase1_epochs: 50
+  retrain_epochs: 30
+wfo:
+  burn_in:
+    phase1_weeks: 104
+    phase2_weeks: 52
+    volatility_percentile: 0.75
+  retrain:
+    lookback_weeks: 104
+  weights_path: models/ae_weights_{year}Q{quarter}.pth

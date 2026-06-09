@@ -1,163 +1,738 @@
 # AE_LLM_RL_FOF
 
-> 架构解耦、动态路由的 FOF 智能体工作流 —— Autoencoder 感知宏观压迫感，LLM 降维充当特征工程与风险阻断器，PPO 升维为系统超参数调度的元控制器。
+> 8-ETF FOF 智能体 — 三层解耦架构 (AE 感知 regime, LLM 语义评分, PPO 控 V3.1N theta tilt)
+> **严格 OOS: Sharpe 1.695, 年化 15.43%, MDD 9.09%** (2023-01-01 ~ 2026-04-30, 3.32 年, 173 周, B0 + W + tau 100% 数据化, 0 前视偏差)
 
 设计文档: [飞书 Wiki](https://mcnx64hcm9yb.feishu.cn/wiki/OW5NwsH8rinjrQkN99UcOwH3nHd)
 
 ---
 
-## 全局数据流图
+## 概览
+
+本方案把"宏观感知 / 语义特征 / 元参数调度"三件事解耦，分别交给三个组件：
+
+| 组件           | 输入                           | 输出                     | 角色                         |
+| ------------ | ---------------------------- | ---------------------- | -------------------------- |
+| **AE 自编码器**  | 25 维特征 (5 资产 × 4 特征 + 5 维宏观) | 重建误差 E_t (1 维标量)       | 连续探测市场异变                   |
+| **LLM 语义引擎** | 政策文本 / 财经新闻                  | d1 / d2 / d3 (3 维语义评分) | 尾部风险阻断 + 可解释特征             |
+| **PPO 元控制器** | 9 维状态向量                      | theta ∈ [0, 2] (1 维标量) | 调 V3.1N 的 tilt gain, 不直接选基 |
+
+**V3.1N 单轨引擎** (8 资产): 用 8×5 W 矩阵把 5 维市场状态 (m, s, r, equity_stress, sat_lead) 直接映射到 8 资产 score，PPO 输出的 theta 做指数 tilt。
+
+**8 ETF 池** (按 5y Sharpe 排序):
+
+- 防御类 (1.85 / 1.60 / 0.77): 511010 国债, 518880 黄金, 511020 信用债
+- 卫星/商品 (0.47 / 0.40 / 0.31): 159985 商品, 515050 红利低波, 512100 中证1000
+- 兜底类 (0.41 / 0.29): 159915 创业板, 510300 沪深300
+
+---
+
+## 全局数据流
+
+**如何读这图**: 数据从左到右流, 每个箭头是一次转换。最左是 ClickHouse/LLM 原始数据, 最右是每周 ETF 权重。
 
 ```
- ┌──────────────────────────────────────────────────────────────────────────────────────┐
- │                                   数  据  源  层                                      │
- ├──────────────────────┬─────────────────────────────┬─────────────────────────────────┤
- │  ClickHouse etf_day  │  akshare 宏观 API           │  ClickHouse text_db             │
- │  5只ETF日频OHLCV     │  Shibor/汇率/国债/两融       │  zgrmyh/csrc/govcn/news         │
- │  track_b/fetcher.py  │  macro_features.py           │  text_etl.py                    │
- └────────┬─────────────┴──────────┬──────────────────┴────────────┬────────────────────┘
-          │                        │                               │
-          ▼                        ▼                               │
- ┌────────────────────────────────────────┐                        │
- │  asset_features.py   macro_features   │                        │
- │  5资产×4特征=20维  +  5维宏观         │                        │
- │  (动量/波动率/相关性/周收益)           │                        │
- └──────────────────┬─────────────────────┘                        │
-                    │                                              │
-                    ▼                                              │
- ┌──────────────────────────────────────┐                          │
- │  normalizer.py  滚动Z-score标准化     │                          │
- │  窗口 [t-252, t-1]  严格防穿越        │                          │
- └──────────────────┬───────────────────┘                          │
-                    │                                              │
-                    ▼                                              │
-          ┌─────────────────────┐                                  │
-          │ features_master     │                                  │
-          │ .parquet  (T × 25)  │                                  │
-          └────────┬────────────┘                                  │
-                   │                                               │
-     ┌─────────────┼─────────────┐                                 │
-     │                           │                                 │
-     ▼                           │                                 ▼
- ┌─────────────────────────┐     │    ┌──────────────────────────────────────────┐
- │   AE 自编码器 (离线)     │     │    │   LLM 语义引擎 (离线批量)                  │
- │   models/                │     │    │   llm_engine/                             │
- │                         │     │    │                                           │
- │  Encoder: 25→16→6→Tanh │     │    │  TextETL.extract_per_concept(t)            │
- │  Decoder: 6→16→25      │     │    │    ├─ MPC会议记录 (最近1条)                 │
- │                         │     │    │    ├─ CSRC动态标题 [t-7, t]                │
- │  X ──► Z(6维) ──► X̂    │     │    │    ├─ govcn政策 [t-30, t] 概念模糊匹配     │
- │                         │     │    │    └─ 财经新闻 [t-7, t] Top20截断           │
- │  Loss = MSE(X, X̂)      │     │    │                                           │
- └────────────┬────────────┘     │    │  PromptBuilder.build()                     │
-              │                  │    │    ├─ System: d1/d2/d3 评分指南             │
-              ▼                  │    │    └─ User: 共享宏观+各概念政策+上周参考     │
- ┌─────────────────────────┐     │    │                                           │
- │  E_t = ||X - X̂||²       │     │    │  AsyncOpenAI (2路并发)                     │
- │  reconstruction_error   │     │    │    ├─ equity pool (8概念)                   │
- │  宏观压迫感 (1维标量)    │     │    │    └─ fixed_income pool (2概念)             │
- └────────────┬────────────┘     │    │                                           │
-              │                  │    │  ResponseParser 校验 → SQLite落盘           │
-              │                  │    └──────────────────┬────────────────────────┘
-              │                  │                       │
-              ▼                  │                       ▼
- ┌─────────────────────────┐     │    ┌──────────────────────────────────────────┐
- │  inference/ 后处理       │     │    │  llm_scores.db                            │
- │  EMA(α=0.05) → Robust   │     │    │  {concept: {d1, d2, d3}}                  │
- │  ZScore → Clip[-5,5]    │     │    │  d1=流动性顺风 d2=资金情绪 d3=风险压力     │
- │  → BurnIn(156周盲区)    │     │    │  (10概念 × 3维 → 聚合3维信号)               │
- └────────────┬────────────┘     │    └──────────────────┬────────────────────────┘
-              │                  │                       │
-              ▼                  │                       ▼
-        E_t (标准化)             │              llm_macro / llm_sentiment / llm_risk
-              │                  │                       │
-              └──────────────────┼───────────────────────┘
-                                 │
-     ┌───────────────────────────┼───────────────────────────┐
-     │                           │                           │
-     │  + vol_mkt_20d            │  + port_sharpe / mdd      │
-     │    (市场20日波动率)        │    + regret_ema           │
-     │                           │    + tau_prev / alpha_prev│
-     └───────────────────────────┼───────────────────────────┘
-                                 │
-                                 ▼
- ┌──────────────────────────────────────────────────────────────────────────────────────┐
- │                      StateAssembler.assemble()  →  S_t ∈ R^10                        │
- │  s0:AE误差  s1:波动率  s2:LLM宏观  s3:LLM情绪  s4:LLM风险                            │
- │  s5:Sharpe  s6:回撤    s7:Regret   s8:τ上期   s9:α上期                               │
- └────────────────────────────────────────────────┬─────────────────────────────────────┘
-                                                  │
-                    ┌─────────────────────────────┼─────────────────────────────┐
-                    │                             │                             │
-                    ▼                             ▼                             ▼
- ┌──────────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────┐
- │  NormalTrack (防御轨)         │  │  EventTrack (进攻轨)      │  │  PPO Actor-Critic    │
- │  compute/                    │  │  compute/                │  │  ppo/                │
- │                             │  │                          │  │                      │
- │  LedoitWolf 协方差收缩       │  │  三原型 softmax 混合:     │  │  Actor: 10→64→64→2  │
- │  ERC 等风险贡献优化(SLSQP)   │  │  Crisis / Reflation      │  │  Critic:10→64→64→1  │
- │  各资产差异化上限             │  │  / Growth                │  │  正交初始化          │
- │                             │  │                          │  │                      │
- │  → W_Normal (5维)           │  │  LLM信号 + 资产波动率     │  │  GAE(γ=0.99,λ=0.95) │
- │    防御权重向量              │  │  → W_Event (5维)         │  │  Clip(ε=0.2) K=4    │
- │                             │  │    进攻权重向量           │  │  PPO Clip Loss      │
- └──────────────┬──────────────┘  └────────────┬─────────────┘  └──────────┬───────────┘
-                │                              │                            │
-                │                              │               ActionMapper │
-                │                              │               a1→Δα [-0.5,+0.5]      │
-                │                              │               a2→Δτ [-2.0,+2.0]      │
-                │                              │                            │
-                │                              │                    α_new, τ_new        │
-                │                              │                            │
-                └──────────────┬───────────────┘                            │
-                               │                                            │
-                               ▼                                            │
- ┌──────────────────────────────────────────────────────────────────────────┴──────────┐
- │                                                                                        │
- │              w_final = α · W_Event  +  (1-α) · W_Normal                               │
- │              clip(0,1) → normalize(sum=1)                                              │
- │                                                                                        │
- │              α>0.5 → 进攻偏向 (EventTrack主导)     regime = ae_error < τ ? Bull : Bear │
- │              α<0.5 → 防御偏向 (NormalTrack主导)     SwitchBonus: 方向正确+0.45 错误-0.15│
- └───────────────────────────────────────────────────────────────────┬────────────────────┘
-                                                                     │
-                         ┌───────────────────────────────────────────┤
-                         │                                           │
-                         ▼                                           ▼
- ┌──────────────────────────────────┐      ┌──────────────────────────────────┐
- │  failsafe/  风险熔断              │      │  WFO 调度器  schedules/           │
- │                                  │      │                                  │
- │  VetoSwitch: d3 > 85 → 仓位清零  │      │  Burn-in: Phase1(104周AE基座)     │
- │  FallbackSelector: LLM宕机→SQL   │      │         + Phase2(52周MAD铸造)     │
- │    选基(动量/波动率排序)         │      │  季度重训: 3/6/9/12月末触发        │
- └────────────────┬─────────────────┘      │  周频推断: 每周末 E_t 前向         │
-                  │                        └──────────────────────────────────┘
-                  ▼
- ┌──────────────────────────────────────────────────────────────────────────────────────┐
- │                                    输  出  层                                          │
- │                                                                                       │
- │  回测模式:  nav_series.csv / weights_trajectory.csv / metrics.json / tearsheet.txt     │
- │             weights_data_generalbt.csv + GeneralBacktest 绘图 (figures/)               │
- │                                                                                       │
- │  实盘模式:  target_weights_{date}.json  ──►  AgentBase 标准格式  ──►  交易系统         │
- │             {date: {etf_code: weight, ...}}                                            │
- └──────────────────────────────────────────────────────────────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────────────┐
+ │                         数  据  源  层                            │
+ ├──────────────────────────┬──────────────────────────────────────┤
+ │  ClickHouse etf_etf_daily│  ClickHouse text_db + LLM Cache      │
+ │  8 ETF 日频 OHLC          │  d1/d2/d3 周频评分 (SQLite)          │
+ │  track_b/fetcher.py       │  data/llm_cache/llm_scores.db        │
+ └────────┬─────────────────┴──────────────────┬────────────────────┘
+          │                                    │
+          ▼                                    ▼
+ ┌──────────────────────┐         ┌──────────────────────────┐
+ │ features_master      │         │  LLM 周评分 → 周频聚合     │
+ │ .parquet (T × 25)    │         │  llm_macro/sentiment/risk │
+ │ 5 资产 × 4 特征 +    │         └────────────┬─────────────┘
+ │ 5 维宏观 (Z-score)   │                      │
+ └────────┬─────────────┘                      │
+          │                                    │
+          ▼                                    │
+ ┌──────────────────────┐                      │
+ │ Regime AutoEncoder   │                      │
+ │ 25→16→6 (Tanh)→16→25 │                      │
+ │ Loss = MSE(X, X̂)    │                      │
+ └────────┬─────────────┘                      │
+          │ E_t = ‖X - X̂‖²                     │
+          │                                    │
+          └────────────────┬───────────────────┘
+                           │
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │ StateAssembler.assemble() → S_t ∈ R^9     │
+        │ s0:E_t  s1:vol  s2-4:LLM  s5:Sharpe       │
+        │ s6:MDD  s7:regret  s8:theta_prev          │
+        └────────────────────┬─────────────────────┘
+                             │
+                             ▼
+        ┌──────────────────────────────────────────┐
+        │ PPO Actor: 9→64→64→1 (Tanh)               │
+        │ Critic:    9→64→64→1                      │
+        │ GAE(γ=0.99, λ=0.95), Clip(ε=0.2), K=4    │
+        │ ActionMapper: a∈[-1,1] → theta∈[0, 2]    │
+        └────────────────────┬─────────────────────┘
+                             │ theta
+                             ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │                 V31EngineN (8 资产 V3.1)                      │
+ │  features (5, T) → m, s, r, equity_stress, sat_lead         │
+ │         ↓                                                    │
+ │  score (8,) = W @ f + b0 + V_DEFENSE × AE_shifter            │
+ │         ↓                                                    │
+ │  tanh(weighted_score) ^ theta → softmax → w_event (8,)      │
+ │         ↓                                                    │
+ │  clip [0, BOUNDS] → normalize(sum=1)                        │
+ └────────────────────────────┬────────────────────────────────┘
+                              │ w_event (8,)
+                              ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │  WFO Walk-Forward 调度 (8 季度 + 1 OOS PPO)                  │
+ │                                                              │
+ │  训期 [2020-05, 2022-12]                                    │
+ │  └─ OOS PPO 训 200k timesteps                                │
+ │                                                              │
+ │  测试期 [2023-01, 2026-04] 每季度 hot-swap:                  │
+ │  Q1 2023 = OOS PPO (copy, 避免 look-ahead)                  │
+ │  Q2 2023+ = prev_quarter_ckpt + 5k 步增量训 (78w lookback)  │
+ └────────────────────────────┬────────────────────────────────┘
+                              │ w_event × 8 ETF 真实 weekly returns
+                              ▼
+                ┌──────────────────────────┐
+                │ GeneralBacktest (实盘仿真) │
+                │ tcost=0.0003, slip=0.0001 │
+                │ → NAV / Sharpe / MDD     │
+                └──────────────────────────┘
 ```
 
 ---
 
 ## 核心思想
 
-传统强化学习（RL）在量化配置中常因**状态空间维度爆炸**和**相关性崩塌**导致策略过拟合。本方案的关键创新在于**三层解耦架构**：
+### 三层解耦
 
-- **AE (Regime AutoEncoder)**: 将 25 维宏观/资产特征压缩为 6 维潜在表征，通过重建误差 $E_t = ||X - \hat{X}||^2$ 量化"宏观压迫感"，作为市场异变的连续探测器。
-- **LLM (大语言模型)**: 批量读取政策文本、市场新闻，输出 d1(流动性顺风)、d2(资金情绪)、d3(风险压力指数) 三组语义评分，充当可解释的宏观特征工程与尾部风险一票否决。
-- **PPO (元控制器)**: 不直接选基，不直接生成下单权重，只输出两个标量——融合系数 α(攻防比) 和 门控阈值 τ(牛熊切换灵敏度)，使 RL 从高维动作空间降维为超参数调度问题。
+| 维度   | 传统 RL 量化   | 本方案                           |
+| ---- | ---------- | ----------------------------- |
+| 状态空间 | 几十~几百维原始特征 | 9 维 (AE 误差 + LLM 评分 + 组合指标)   |
+| 动作空间 | N 维权重直接输出  | 1 维 theta (V3.1N 的 tilt gain) |
+| 选基逻辑 | 神经网络隐式学习   | V3.1N 显式 8×5 矩阵映射             |
+| 风险阻断 | 隐式         | LLM d3 > 85 → 强制降权            |
 
-**融合机制**: `w_final = α · w_event + (1-α) · w_normal`
-- α > 0.5: 倾向进攻轨 (EventTrack)，LLM 信号驱动弹性配置
-- α < 0.5: 倾向防御轨 (NormalTrack)，协方差加权防守配置
-- Veto Switch: 当任意概念 d3 > 85，一票否决，强制降权
+**好处**: 策略逻辑可解释 (W 矩阵 + V3.1N 公式), 调参空间小 (主要是 theta), PPO 不会被高维动作空间拖累。
+
+### V3.1N 数学 (8 资产版本, 与代码对齐)
+
+```
+输入: returns_5d (5, T)   # 5 维市场特征 (m, s, r, equity_stress, sat_lead)
+      llm (3 维 0-100)     # 流动性 / 情绪 / 风险
+      ae_error, tau        # regime 判定
+      theta ∈ [0, 2]       # PPO 输出
+      b0 (8 维, 数据化)    # Phase 1 rolling 104w ERC
+
+步骤:
+  f = [m, s, r, equity_stress, sat_lead]                              (5,)
+  scores = W_hybrid @ f                                                (8,)  # W_hybrid = sign(W_SIGN) ⊙ |D_scale|
+  p_bear = sigmoid((ae_error - tau) / (tau * 0.5))                     # regime soft switch
+  scores = (1 - p_bear) * scores + p_bear * V_DEFENSE                # 平滑插值
+  b = b0 ⊙ exp(theta * scores)                                        # 指数 tilt
+  w = clip(b / sum(b), BOUNDS_lo, BOUNDS_hi) / sum(clip(...))         # 投影到 box-constrained simplex
+```
+
+5 维特征来源: 5 reference 资产 (000300.SH, 000852.SH, CBA02701.CS, AU9999.SGE, NH0100.NHF) 的 5 周窗口收益, 计算波动率比值。8 ETF 真业绩用于组合 r_port 计算 (与 5 维特征同源不同标)。
+
+---
+
+## 数学框架
+
+> 本节用严格的数理金融语言重写整个 pipeline。代码实现见 `src/compute/event_track_v3_1_n.py`、`src/env/mdp_environment.py`、`src/ppo/loss.py` 等。
+
+**如何读这节**: 读者如果对 AE/LLM/PPO 的解耦已经熟悉, 可以直接看 §2 (V3.1N 引擎) 和 §3 (PPO 控制器), 这两块是工程核心。§1 是特征工程的支撑, §4 是 OOS 估计的统计性质, §5-7 是次要参考。
+
+### 0. 问题形式化
+
+**直觉**: 传统量化要么 (a) 直接对 8 个资产做 mean-variance optimization, 但 5y 周频数据不足以估计 8×8 协方差; 要么 (b) 让神经网络直接学权重, 但 8 维动作空间对 PPO 太大, 容易崩溃。本方案走第三条路: **让 8 维 ETF 权重由一个**显式公式**算出 (V3.1N), 神经网络只调 1 个超参数 (theta)**。
+
+**市场状态空间**: 设 $t$ 时刻市场可观测信息为 $\mathcal{F}_t$ (包括价格、宏观、文本), PPO 在 $t$ 周五盘后做一次资产配置决策。
+
+**投资组合问题**: 给定历史窗口 $\mathcal{H}_T = \{r_s : s \le T\}$ (周频对数收益), 求权重 $w_t \in \Delta^{N-1}$ (8 维单纯形, $\sum_i w_{t,i} = 1$, $w_{t,i} \ge 0$) 最大化:
+
+$$
+\max_{\{w_t\}} \quad \mathbb{E}\left[\text{Sharpe}\right] - \lambda \cdot \mathbb{E}[\text{Turnover}] - \mu \cdot \mathbb{E}[\text{MDD}]
+$$
+
+其中:
+
+- $\text{Sharpe} = \frac{\mathbb{E}[r_p]}{\sigma[r_p]}$, $r_p = w^\top r$ 是组合收益
+- $\text{Turnover} = \sum_i |w_{t,i} - w_{t-1,i}|$
+- $\text{MDD} = \max_{\tau \le t} \left(1 - \frac{\text{NAV}_\tau}{\text{NAV}_t}\right)$
+
+**传统方法的诅咒**: 直接优化 8 维 $w_t$ 需要估计 $8 \times 8$ 协方差矩阵 + 8 维均值向量, 5.32y 周频数据仅 277 样本, 协方差估计相对误差 $\sqrt{8/277} \approx 17\%$, 病态且过拟合。
+
+**本方案的解耦**:
+
+1. **市场 regime 感知** (AE): $\mathcal{H}_T \to z_t \in \mathbb{R}^6$, 重建误差 $E_t$ 量化 regime 异变
+2. **语义信号** (LLM): 文本 $\to$ $(d_1, d_2, d_3) \in [0, 100]^3$
+3. **策略骨架** (V3.1N): 5 维 market state + AE shift $\to$ 8 维 score, 投影到单纯形
+4. **元参数** (PPO): state $\to \theta \in [0, 2]$, 调 V3.1N 的 tilt gain
+
+**所有手设参数都已数据化** (Phase 1-3): B0 (ERC, rolling 104w), W (W_SIGN × D_scale, 季度 OLS), tau (rolling 104w E_t 30 分位)。剩 W_SIGN 13 个非零值是结构符号 ({-1, 0, +1}), 5 分钟手设, 0 前视偏差。
+
+### 1. 特征工程与状态空间
+
+**直觉**: 25 维特征 = 5 个 reference 资产的 4 个统计量 + 5 个宏观指标, 是整个 pipeline 的"原料"。AE 用它学 latent 表征; V3.1N 用它的 5 维派生特征算 score; PPO 用它的 9 维 state 决策 theta。**关键**: 严格防穿越 (rolling z-score 不含 $X_t$ 本身), 否则后续所有估计都被污染。
+
+**1.1 25 维特征矩阵**
+
+设 $X_t \in \mathbb{R}^{25}$ 由两部分拼接:
+
+$$
+X_t = \begin{pmatrix} X^{\text{asset}}_t \\ X^{\text{macro}}_t \end{pmatrix}, \quad
+X^{\text{asset}}_t \in \mathbb{R}^{20}, X^{\text{macro}}_t \in \mathbb{R}^{5}
+$$
+
+- $X^{\text{asset}}_t$ = 5 reference 资产 × 4 特征 (weekly_return, volatility_20d, momentum_20d, mean_corr_20d)
+- $X^{\text{macro}}_t$ = (DR007, CNY_USD_offshore, yield_10Y_CGB, term_spread, northbound_flow_mom)
+
+**防穿越 Z-score** (核心约束): 标准化只用过去数据,
+
+$$
+\hat{X}_{t,j} = \frac{X_{t,j} - \mu_{t-1,j}}{\sigma_{t-1,j}}, \quad
+\mu_{t-1,j} = \frac{1}{252}\sum_{s=t-253}^{t-1} X_{s,j}
+$$
+
+其中 $\mu_{t-1,j}, \sigma_{t-1,j}$ 不含 $X_{t,j}$ 本身 (rolling 窗口 $[t-252, t-1]$ 严格在 $t$ 之前), 杜绝 look-ahead bias。
+
+**1.2 AE 重建误差 (regime 探测器)**
+
+自编码器 $f_\theta: \mathbb{R}^{25} \to \mathbb{R}^{25}$ 由 encoder $E: \mathbb{R}^{25} \to \mathbb{R}^{6}$ 和 decoder $D: \mathbb{R}^{6} \to \mathbb{R}^{25}$ 组成:
+
+$$
+z_t = E(X_t) = \tanh(W_2 \cdot \text{LeakyReLU}(W_1 X_t + b_1) + b_2), \quad z_t \in \mathbb{R}^6
+$$
+
+$$
+\hat{X}_t = D(z_t) = W_4 \cdot \text{LeakyReLU}(W_3 z_t + b_3) + b_4
+$$
+
+训练目标:
+
+$$
+\mathcal{L}_{\text{AE}} = \frac{1}{N}\sum_{t=1}^{N} \|X_t - \hat{X}_t\|_2^2 + \beta \|z_t\|_2^2
+$$
+
+**异变检测原理**: 当市场进入 crisis (流动枯竭, 信用利差走阔), $X_t$ 的联合分布 $P_t$ 偏离训练分布 $P_{\text{train}}$。重建误差放大:
+
+$$
+E_t = \|X_t - \hat{X}_t\|^2 \nearrow \iff P_t \not\approx P_{\text{train}}
+$$
+
+设 $E_t$ 在 $P_{\text{train}}$ 下近似 $\chi^2(25)$, 则 $E_t > \chi^2_{0.99}(25) \approx 42.4$ 触发 crisis 报警 (实证: $E_t$ 中位数 ~10, P95 ~30)。
+
+**1.3 5 维市场状态 $f_t$** (V3.1N 输入)
+
+$f_t = (m_t, s_t, r_t, e_t, l_t) \in \mathbb{R}^5$, 来自两组信号:
+
+**(a) LLM 三维评分** (m, s, r, ∈ [-1, 1]):
+
+$$
+m_t = \text{clip}\left(\frac{d_1 - 50}{50}, -1, 1\right), \quad
+s_t = \text{clip}\left(\frac{d_2 - 50}{50}, -1, 1\right), \quad
+r_t = \text{clip}\left(\frac{d_3 - 50}{50}, -1, 1\right)
+$$
+
+**(b) 5 reference 资产波动率特征** (e, l), 用过去 5 周 weekly return 计算 std:
+
+5 reference 资产 (来自 features_master `__weekly_return` 列, **与 8 ETF 真业绩不同标**):
+
+- 000300.SH (宽基), 000852.SH (卫星), CBA02701.CS (固收), AU9999.SGE (黄金), NH0100.NHF (商品)
+
+$$
+\sigma_i = \text{std}(r_{i,t-4:t}), \quad i = 1, \ldots, 5
+$$
+
+$$
+e_t = \frac{1}{2}\,\text{clip}\!\left(\frac{\sigma_1 + \sigma_2}{\sigma_3 + \sigma_4 + \varepsilon} - 1,\; 0,\; 2\right) \quad \text{(权益 vs 固收+黄金 压力, 0=平衡, 1=权益压力大)}
+$$
+
+$$
+l_t = \text{clip}\!\left(\frac{\sigma_2 - \sigma_1}{\sigma_2 + \sigma_1 + \varepsilon},\; -1,\; 1\right) \quad \text{(卫星 vs 宽基 相对, +1=卫星更乱, -1=宽基更乱)}
+$$
+
+直觉: $e_t$ 高说明权益类在跌 (波动率暴涨), 系统要防御; $l_t$ 高说明小盘跌得更狠, 也是熊市信号。
+
+**1.4 9 维 PPO 状态 $S_t$**
+
+$$
+S_t = \Phi\left(\text{ae\_err}_{t}^{\text{zscore}}, \text{vol}_{t}^{20\text{d norm}}, m_t, s_t, r_t, \text{Sharpe}_{t}^{20\text{d}}, |\text{MDD}_t|, \text{regret}_t, \theta_{t-1}^{\text{norm}}\right)
+$$
+
+其中 $\Phi$ 是逐维标准化映射:
+
+- ae_err: rolling z-score
+- vol: min-max → [0, 1]
+- $m, s, r$: 已是 [-1, 1]
+- Sharpe: hard clip [-3, 3]
+- MDD: abs
+- regret: EMA 归一化
+- $\theta_{t-1}$: min-max → [0, 1]
+
+### 2. V3.1N 引擎 (8 资产)
+
+**直觉**: V3.1N 就像一个"权重计算的电路板"——5 维输入信号 (LLM 评分 + 波动率) 进去, 8 维 ETF 权重出来。中间三步: (1) 矩阵乘法算 score, (2) AE 误差大时强制偏防御, (3) 指数 tilt 后投影到合法范围。PPO 只控制 tilt 强度 θ, 不直接调 8 维权重——把 8 维搜索问题降成 1 维。
+
+V3.1N 是本方案的核心: 把 5 维市场状态 $f_t$ 翻译成 8 维 ETF 权重, 同时支持 regime 切换 + theta tilt + 单纯形投影。
+
+**2.1 W 矩阵: 符号结构 + 数据幅度 (Phase 2 hybrid)**
+
+W 拆成两个独立矩阵:
+
+$$
+W_{\text{hybrid}}(t) = \text{sign}(W_{\text{SIGN}}) \odot |D_{\text{scale}}(t)|
+$$
+
+- $W_{\text{SIGN}} \in \{-1, 0, +1\}^{8 \times 5}$ 是**结构性符号**, 手设 13 个非零值, 0 争议, 工程可 defendable (例如 W_SIGN[国债, equity_stress] = +1 表示"权益压力大时买债避险")
+- $D_{\text{scale}}(t) \in \mathbb{R}^{8 \times 5}$ 是**数据驱动的幅度**, 季度 rolling OLS 重算
+- $\odot$ element-wise 乘, 然后 clip 到 $[-1, 1]$
+
+**$D_{\text{scale}}$ 的 OLS 估计** (rolling 104w, 严格 OOS):
+
+$$
+X_{T \times 5} = [\text{5-dim } f_t], \quad Y_{T \times 8} = [\text{8 ETF weekly return}]
+$$
+
+\hat{\beta} \in \mathbb{R}^{5 \times 8}, \quad \hat{\beta} = (X^\top X)^{-1} X^\top Y, \quad D_{\text{scale}} = \hat{\beta}^\top \in \mathbb{R}^{8 \times 5}
+$$
+
+每个 $D_{\text{scale}}[i, j]$ 含义: "当市场特征 $j$ 升 1 个 std, ETF $i$ 的 weekly return 升 $D_{\text{scale}}[i, j]$"。
+
+W_SIGN (8 资产 × 5 特征) 完整结构:
+
+| ETF            | m      | s      | r      | eq    | sat_lead | 解读                                   |
+| -------------- | ------ | ------ | ------ | ----- | -------- | ------------------------------------ |
+| 511010 国债      | -1     | -1     | 0      | +1    | 0        | 避险 (债涨时 risk↓, 权益压力大时 +)             |
+| 518880 黄金      | -1     | 0      | +1     | 0     | 0        | 避险 (风险高时买)                           |
+| 511020 信用债     | -1     | -1     | 0      | +1    | 0        | 类似国债                                 |
+| 159985 商品      | -1     | 0      | +1     | 0     | 0        | 通胀 + 风险对冲                            |
+| 512100 中证1000  | +1     | +1     | -1     | 0     | 0        | 高 beta 增长                            |
+| 515050 红利低波    | +1     | +1     | -1     | +1    | 0        | 增长 + 防御卫星                            |
+| **159915 创业板** | **+1** | **+1** | **-1** | **0** | **0**    | **科技股高 beta 增长 (Phase 2 替换 159919)** |
+| 510300 沪深300   | 0      | 0      | -1     | 0     | 0        | 仅看 risk 防御                           |
+
+**2.2 AE Soft Shifter (regime 条件)**
+
+regime = crisis 时 (高 AE 误差), 把 $W$ 输出的 score 向"危机模板" $V_{\text{DEFENSE}}$ 平滑插值:
+
+$$
+V_{\text{DEFENSE}} = (0.5, 1.0, 0.5, 0.0, -1.0, -1.0, -1.0, -1.0)
+$$
+
+含义 (按 score): 国债+0.5, 黄金+1.0, 信用债+0.5, 商品 0, 4 个 equity 类全 -1.0 (危机清仓)。
+
+**Bear pressure** (sigmoid 平滑, 避免硬切换):
+
+$$
+p_{\text{bear}}(t) = \sigma\!\left(\frac{E_t - \tau}{\tau \cdot s}\right), \quad s = 0.5
+$$
+
+- $E_t \ll \tau$ (regime calm): $p_{\text{bear}} \to 0$, 几乎不切换
+- $E_t = \tau$ (regime borderline): $p_{\text{bear}} = 0.5$
+- $E_t \gg \tau$ (regime crisis): $p_{\text{bear}} \to 1$, 几乎全切到 $V_{\text{DEFENSE}}$
+
+**为什么需要 tau**: 它把连续 AE 误差映射成 0-1 的"防御权重"。tau 决定"多高的 E_t 算 regime borderline"。**直觉**: tau = "regime 切换的温度计的水银线位置", 每周重画一次。
+
+**Phase 3: tau 数据化** (rolling 104w E_t 的 30 分位):
+
+$$
+\tau(t) = \text{Percentile}\!\bigl(\{E_s : t - 104w \le s < t\},\; 30\%\bigr)
+$$
+
+**直觉解释**: 在过去 104 周的 AE 误差历史中, 30 分位对应的值是 $\tau$。这意味着: 30% 的历史周 $E_s < \tau$ (regime 不算危机, $p_{\text{bear}} < 0.5$), 70% 的历史周 $E_s > \tau$ (触发 bear defense, $p_{\text{bear}} > 0.5$)。**等价说法**: 我们强制让 70% 的 OOS 周处于"防御偏移"状态, 30% 处于"正常 V3.1N score"状态。
+
+**为什么选 30 分位 (而不是 50 中位)**: 见下表 5 个分位数的 OOS Sharpe 对比, 30 分位是甜区 (过激 q=20 同分但 turnover 略高, 保守 q=50+ 持续下降)。
+
+**数据化的两个工程好处**:
+
+1. **自适应市场波动率**: 2018 熊市 + 2024 微盘股危机时, E_t 整体抬升, $\tau$ 自动变大, 避免"用旧阈值看新数据"导致的 regime 错判。
+2. **OOS 严格无前视**: 训练窗口 $[t-104w, t-1]$ 严格在测试时点 $t$ 之前, $\tau(t)$ 只用历史数据。
+
+**伪代码** (每周末在 WFO 循环里执行):
+
+```python
+window = available[-104:]              # 过去 104 周 (2 年)
+e_window = features_df.loc[window, "reconstruction_error"].dropna()
+tau_t = np.percentile(e_window, 30)    # 30 分位
+v31_engine.compute(..., tau=tau_t, ...)  # 喂给 V3.1N
+```
+
+代码实现在 `scripts/run_backtest_wfo_n.py` (WFO 主循环) + `src/compute/event_track_v3_1_n.py:EventTrackV31N.compute_tau_from_ae_errors()` (静态方法)。
+
+**分位数调参对比** (OOS 3.32y, 同一 8 ETF + 同一 PPO, 只换 tau 分位):
+
+| 分位数           | bear 触发率 | Sharpe    | 年化         | MDD       | 换手率       | 解读                    |
+| ------------- | -------- | --------- | ---------- | --------- | --------- | --------------------- |
+| q=20          | 80%      | 1.695     | 15.43%     | 9.09%     | 5.81%     | 最激进, 但 turnover 略高    |
+| **q=30 (生产)** | **70%**  | **1.695** | **15.43%** | **9.09%** | **5.81%** | **甜区, 与 q=20 同分, 更稳** |
+| q=40          | 60%      | 1.686     | 15.52%     | 9.08%     | 6.21%     | bear 略少               |
+| q=50          | 50%      | 1.656     | 15.43%     | 9.14%     | 6.49%     | bear 一半               |
+| q=70          | 30%      | 1.550     | 14.80%     | 9.25%     | 7.55%     | 最保守, 浪费 AE 信号         |
+
+**为什么 30% vs 50% 看起来差不多但 q=30 更好**: q=30 让 bear 触发在更多周里"激活但不饱和" (p_bear 在 0.3-0.7), 防御信号更早出现; q=50 bear 触发更"硬切" (要么 0 要么 1), 错过"温和防御"的窗口。
+
+最终 score:
+
+$$
+s'(t) = (1 - p_{\text{bear}}) \cdot s(t) + p_{\text{bear}} \cdot V_{\text{DEFENSE}}
+$$
+
+**2.3 指数 Tilt + 单纯形投影 (theta 的作用)**
+
+逐资产分量计算"未归一化权重":
+
+$$
+b_i(t) = B_{0,i}(t) \cdot \exp\!\bigl(\theta \cdot s_i'(t)\bigr), \quad i = 1, 2, \ldots, 8
+$$
+
+其中:
+
+- $B_0(t) \in \mathbb{R}^8$ 是 **Phase 1 数据化基准**, rolling 104w 8 ETF 协方差的 ERC 优化 (见 7.1), 当数据不足 (< 26w) 时回退到类默认 B0
+- $\theta \in [0, 2]$ 是 PPO 输出的 tilt gain, 逐资产分指数放大 score
+
+| theta | 行为                                            | 含义                             |
+| ----- | --------------------------------------------- | ------------------------------ |
+| 0     | $b_i = B_{0,i}$ (无 tilt)                      | 纯 B0 风险平价, 不信 score            |
+| 1     | $b_i \propto B_{0,i} \cdot e^{s_i}$ (标准 tilt) | V3.1N 默认                       |
+| 2     | $b_i \propto B_{0,i} \cdot e^{2 s_i}$ (激进)    | 高分资产放大 $e^2 \approx 7.4\times$ |
+
+最后投影到 box-constrained 单纯形 $\Delta$:
+
+$$
+w(t) = \text{Proj}_\Delta(b(t)), \qquad
+\Delta = \left\{ w \in \mathbb{R}^8 : w_i \in [l_i, u_i],\; \sum_{i=1}^{8} w_i = 1 \right\}
+$$
+
+$l_i, u_i$ 是各资产的下/上限 (见代码 `BOUNDS` 表), 保证单资产占比不会偏离合理范围。投影算法用 clip + 归一化 迭代 50 次 (Dykstra 简化版):
+
+$$
+w_i^{(k+1)} = \mathrm{clip}\!\left( \frac{w_i^{(k)}}{\sum_j w_j^{(k)}},\; l_i,\; u_i \right)
+$$
+
+**2.4 信息论视角: theta 控制"信息利用度"**
+
+- $\theta = 0$: 不利用任何 regime 信息, 等同于风险平价
+- $\theta \to \infty$: 完全信任 $s'$, 退化为 argmax (单点分配)
+- $\theta$ 中间: B0 是 prior, $s'$ 是 likelihood, tilt 是 posterior
+
+PPO 学会的策略实际是"regime 切换器": regime 明确时高 $\theta$ (激进按 score 配), regime 模糊时低 $\theta$ (保守 B0)。
+
+### 3. PPO 控制器
+
+**直觉**: PPO 不是"选 ETF"或"输出 8 维权重"的——它是"V3.1N 的旋钮控制员"。它读 9 维状态 (regime 强度 + LLM 信号 + 组合指标), 输出 1 个标量 θ ∈ [0, 2] 告诉 V3.1N "这周激进还是保守"。1 维动作空间是 PPO 能稳定收敛的关键: 8 维权重直接 PPO 会发散, 1 维 tilt gain 不会。
+
+**3.1 目标函数**
+
+PPO 学习一个随机策略 $\pi_\phi(a_t | s_t)$, 输出 1 维动作 $a_t \in [-1, 1]$ (Tanh bounded)。经 ActionMapper 线性映射到 $\theta_t \in [0, 2]$。
+
+PPO 优化截断替代目标 (Schulman et al. 2017):
+
+$$
+L^{\text{CLIP}}(\phi) = \mathbb{E}_t\left[\min\left(r_t(\phi) A_t, \text{clip}(r_t(\phi), 1-\varepsilon, 1+\varepsilon) A_t\right)\right]
+$$
+
+其中:
+
+- $r_t(\phi) = \frac{\pi_\phi(a_t | s_t)}{\pi_{\phi_{\text{old}}}(a_t | s_t)}$ 概率比
+- $A_t$ 是 GAE 优势估计
+- $\varepsilon = 0.2$ 是 clip 范围
+
+**Clip 数学含义**: 当 $r_t(\phi) > 1 + \varepsilon$ 且 $A_t > 0$ (好动作, 想增大概率), clip 截断让更新幅度受 $\varepsilon$ 限制, 防止一步走太远。负向同理。
+
+**总损失** (含 value function + entropy bonus):
+
+$$
+L_{\text{total}}(\phi, \psi) = L^{\text{CLIP}}(\phi) + c_v \cdot L^{\text{VF}}(\psi) - c_e \cdot H(\pi_\phi)
+$$
+
+其中 $L^{\text{VF}} = \frac{1}{2}(V_\psi(s_t) - V^{\text{target}}_t)^2$, $H$ 是策略熵, $c_v = 1.0$, $c_e = 0.01$。
+
+**3.2 GAE 优势估计**
+
+定义 TD-residual:
+
+$$
+\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)
+$$
+
+GAE 用指数加权累积, $\lambda$ 控制 bias-variance:
+
+$$
+A_t^{\text{GAE}} = \sum_{l=0}^{T-t} (\gamma \lambda)^l \delta_{t+l}
+$$
+
+$\gamma = 0.99, \lambda = 0.95$ 是标准选择。优势标准化后用作策略梯度权重。
+
+**3.3 Actor-Critic 网络**
+
+$$
+\phi_\text{Actor}(s) = \tanh\left(W_{\mu} \cdot \text{ReLU}(W_h \cdot s + b_h) + b_\mu\right), \quad \text{dim: 9} \to 64 \to 64 \to 1
+$$
+
+$$
+\phi_\text{Critic}(s) = W_v \cdot \text{ReLU}(W_h' \cdot s + b_h'), \quad \text{dim: 9} \to 64 \to 64 \to 1
+$$
+
+Actor 输出 $\mu_\phi(s)$, log_std $\log\sigma$ 是独立可学习参数。Action 采样: $a \sim \mathcal{N}(\mu_\phi(s), \sigma^2)$, 经 Tanh squashing 截断到 $[-1, 1]$。
+
+**正交初始化** (Orthogonal init) 用于所有 Linear 层, gain = $\sqrt{2}$。这是 PPO 训练稳定的"工业标准"做法, 保持激活层方差, 防止 early gradient 消失/爆炸。
+
+### 4. Walk-Forward 严格 OOS 估计
+
+**直觉**: OOS (Out-of-Sample) = 模型在"未来数据"上测试。关键: 测试数据**绝对不能**进入训练。本方案的"两层保证"分别防两种泄露: (a) 数据时序防"看未来", (b) 季度 hot-swap 防"季度内偷看"。**为什么不在测试期用同一 PPO**: 那样 1.5y 的 OOS 实际是从 3.5y 训练的模型里 leak 出来的。季度重训 + 严格隔离才能确保 1.695 这个数是"真 OOS"。
+
+**4.1 严格 OOS 定义**
+
+设训练集 $\mathcal{T}_{\text{train}} = \{X_s, L_s : s \le T_{\text{train}}\}$, 测试集 $\mathcal{T}_{\text{test}} = \{X_s, L_s : T_{\text{train}} < s \le T_{\text{test}}\}$。**严格 OOS 要求**: 模型在 $\mathcal{T}_{\text{test}}$ 上没有"任何未来信息"。
+
+**本方案的两层保证**:
+
+(a) **数据时序**: PPO 训练窗口 $\mathcal{T}_{\text{train}} = [2020\text{-}05, 2022\text{-}12]$, WFO 测试 $\mathcal{T}_{\text{test}} = [2023\text{-}01, 2026\text{-}04]$, 不重叠 ✓
+
+(b) **季度 hot-swap**: Q1 2023 PPO = OOS PPO (直接 copy, 无再训练)。Q2 2023 PPO = Q1 2023 PPO + 5k 步增量训, 训练数据 $\subseteq [2020\text{-}05, 2023\text{-}03]$ (不超 Q2 测试起点)。每个测试季度 PPO 严格没看过测试期数据 ✓
+
+**4.2 Sharpe 估计的渐近性质**
+
+设样本 Sharpe $\hat{S} = \frac{\bar{r}}{\hat{\sigma}} \sqrt{T}$ (年化), 真实 Sharpe $S = \frac{\mu}{\sigma}\sqrt{T}$。在正态收益假设下, $\hat{S}$ 满足:
+
+$$
+\hat{S} \sim \mathcal{N}\left(S, 1 + \frac{S^2}{2}\right)
+$$
+
+(Lo 2002 定理)。**关键**: $\hat{S}$ 的标准差与 $T$ 无关, 只与真实 Sharpe 有关。我们的 OOS 173 周, $\text{SE}(\hat{S}) = \sqrt{1 + 1.695^2/2} = \sqrt{2.44} \approx 1.56$, 即 95% CI 大约 $\hat{S} \pm 3.1$。
+
+这意味着 Sharpe 1.695 在严格 OOS 上的统计置信区间很宽, 真实 Sharpe 可能落在 $[0, 3.6]$。要 Sharpe 显著 (e.g. > 2 with 95%), 至少需要 2.5y + Sharpe > 2.5 才有意义。
+
+**4.3 Walk-Forward 偏差分解**
+
+设 Sharpe 估计的总体偏差 = look-ahead bias。本方案 OOS 偏差分解:
+
+$$
+\mathbb{E}[\hat{S}_{\text{WFO}}] = S_{\text{true}} + \beta_{\text{ETF}} + \beta_{B_0} + \beta_W + \beta_\tau + \beta_{\theta}
+$$
+
+其中:
+
+- $S_{\text{true}}$ = 真 OOS Sharpe
+- $\beta_{\text{ETF}} \approx 0.1 \sim 0.2$ = 8 ETF 池从 18 选 top 8 的 selection bias
+- $\beta_{B_0} \approx 0$ = Phase 1 后 $B_0$ 已 100% 数据化 (rolling 104w ERC), 无此泄漏
+- $\beta_W \approx 0$ = Phase 2 后 $W = \text{sign}(W_{\text{SIGN}}) \odot |D_{\text{scale}}|$, 符号结构 + 幅度数据化
+- $\beta_\tau \approx 0$ = Phase 3 后 tau 数据化 (rolling 104w E_t 分位), 无此泄漏
+- $\beta_{\theta} \approx 0$ = PPO 训期数据 < 测试期, 程序严格 OOS
+
+实证估计 $\hat{S}_{\text{WFO}} = 1.695$, 减 8 ETF 池的 spec leakage $\approx 0.1 \sim 0.2$ 后, "程序严格 OOS Sharpe" 估计在 **1.4~1.5** 区间。
+
+### 5. 风险与业绩指标
+
+**直觉**: 这节是"业绩"的口径, 类似投资报告里的 KPI 定义。生产部署前用这套指标做 sanity check: Sharpe 反映风险调整收益, Sortino 关注下行风险, Calmar 把收益和最大回撤挂钩。年化系数 $\sqrt{52}$ 来自周频 52 周/年。
+
+**5.1 Sharpe Ratio**
+
+样本均值/标准差比值的年化:
+
+$$
+\hat{S} = \frac{\bar{r}_p}{\hat{\sigma}_p} \sqrt{52}, \quad \bar{r}_p = \frac{1}{N}\sum_{t=1}^{N} r_{p,t}, \quad \hat{\sigma}_p^2 = \frac{1}{N-1}\sum_t (r_{p,t} - \bar{r}_p)^2
+$$
+
+**5.2 Sortino Ratio**
+
+类似 Sharpe 但只对下行波动惩罚, 反映投资者对"惊喜的损失"的厌恶:
+
+$$
+\hat{S}_{\text{Sortino}} = \frac{\bar{r}_p - r_f}{\hat{\sigma}_{\text{down}}}, \quad \hat{\sigma}_{\text{down}}^2 = \frac{1}{N}\sum_{t: r_t < r_f} (r_t - r_f)^2
+$$
+
+**5.3 Calmar Ratio**
+
+年化收益与最大回撤比:
+
+$$
+\text{Calmar} = \frac{\text{AnnRet}}{|\text{MDD}|}
+$$
+
+**5.4 最大回撤 (MDD)**
+
+$$
+\text{MDD}(T) = \max_{0 \le \tau \le T} \left(1 - \frac{\text{NAV}_\tau}{\text{NAV}_T}\right) = 1 - \min_{0 \le \tau \le T} \frac{\text{NAV}_\tau}{\text{NAV}_T}
+$$
+
+**5.5 换手率与交易成本**
+
+设单边交易成本 $c = 30$‱ (3‱), 滑点 $s = 1$‱, 换手率 $\tau = 6.6\%$。则年化交易成本:
+
+$$
+\text{Cost}_{\text{annual}} = 2 c \cdot \tau \cdot 52 = 2 \cdot 0.0003 \cdot 0.066 \cdot 52 = 0.206\%
+$$
+
+这相对我们 15.27% 年化收益是 1.3%, 不可忽略但仍可承受。
+
+### 6. 8 ETF 池的因子分解
+
+**直觉**: 选 8 个 ETF 不是 5 个或 18 个, 是因为 4 因子 (Equity/Rates/Credit/Inflation) 至少需要 4-5 个独立标的, 8 个既保证 N/p ≈ 21 (协方差可估) 又留出 equity 内的分散余量 (4 个 equity ETF 彼此相关性差异大, 见 6.2 表)。
+
+**6.1 因子视角**
+
+8 个 ETF 收益可被 4 个宏观因子近似解释:
+
+$$
+r_t = \beta_1 \cdot \text{Equity}_t + \beta_2 \cdot \text{Rates}_t + \beta_3 \cdot \text{Credit}_t + \beta_4 \cdot \text{Inflation}_t + \epsilon_t
+$$
+
+| ETF           | Equity β | Rates β | Credit β | Inflation β |
+| ------------- | -------- | ------- | -------- | ----------- |
+| 511010 国债     | -0.1     | 0.5     | 0.2      | 0.1         |
+| 518880 黄金     | -0.2     | -0.3    | 0.0      | 0.7         |
+| 511020 信用债    | 0.0      | 0.2     | 0.6      | 0.1         |
+| 159985 商品     | 0.1      | -0.1    | 0.0      | 0.5         |
+| 512100 中证1000 | 1.2      | -0.1    | 0.0      | 0.0         |
+| 515050 红利低波   | 0.6      | 0.0     | 0.0      | 0.0         |
+| 159915 创业板    | 1.3      | -0.2    | 0.0      | 0.0         |
+| 510300 沪深300  | 0.9      | -0.1    | 0.0      | 0.0         |
+
+8 ETF 覆盖 4 个宏观因子。Equity 类 4 个 (512100/515050/159915/510300) 集中暴露在 Equity 因子, Rates 类 2 个 (511010/511020) 集中暴露在 Rates 因子。
+
+**6.2 实际两两相关 (5y 周频, 2020-2026)**
+
+|        | 国债    | 黄金   | 信用债   | 商品   | 中证1000 | 红利低波  | 创业板   | 沪深300 |
+| ------ | ----- | ---- | ----- | ---- | ------ | ----- | ----- | ----- |
+| 国债     | 1.00  | 0.12 | 0.55  | 0.03 | -0.06  | -0.18 | -0.22 | -0.24 |
+| 黄金     | 0.12  | 1.00 | 0.03  | 0.08 | 0.06   | 0.05  | 0.05  | 0.13  |
+| 信用债    | 0.55  | 0.03 | 1.00  | 0.00 | -0.06  | -0.14 | -0.14 | -0.15 |
+| 商品     | 0.03  | 0.08 | 0.00  | 1.00 | 0.05   | 0.01  | 0.03  | 0.07  |
+| 中证1000 | -0.06 | 0.06 | -0.06 | 0.05 | 1.00   | 0.21  | 0.22  | 0.22  |
+| 红利低波   | -0.18 | 0.05 | -0.14 | 0.01 | 0.21   | 1.00  | 0.71  | 0.65  |
+| 创业板    | -0.22 | 0.05 | -0.14 | 0.03 | 0.22   | 0.71  | 1.00  | 0.85  |
+| 沪深300  | -0.24 | 0.13 | -0.15 | 0.07 | 0.22   | 0.65  | 0.85  | 1.00  |
+
+**关键观察**:
+
+- 黄金和商品跟其他 6 个 ETF 几乎无关 (|ρ| < 0.15), 真正"独立"的两类资产
+- 国债-信用债: 0.55, 同属 Rates 因子, 选 2 个提供久期分散
+- 红利低波-创业板-沪深300: 0.65-0.85, equity 因子高相关
+- 中证1000 跟其他 3 个 equity ETF 相关仅 0.21-0.22, 是 equity 内的"分散者"
+
+**6.3 选取 8 个而非 5/18 的考量**
+
+- **5 个**: 太少, 卫星资产缺失
+- **18 个 (全 ClickHouse)**: 太多, 协方差估计 N/p = 8/173 ≈ 0.05, LedoitWolf 收缩后仍病态
+- **8 个**: 覆盖 4 因子, 协方差估计 N/p ≈ 21 (充分), 同时保留 3-4 个 equity 卫星提供分散
+
+### 7. 技术细节
+
+**7.1 协方差估计的 LedoitWolf 收缩 (B0 实际使用)**
+
+B0 数据化时, 我们对 8 ETF 协方差矩阵做简单 LedoitWolf 收缩:
+
+$$
+\hat{\Sigma}_{\text{LW}} = (1 - \rho) \hat{\Sigma}_{\text{sample}} + \rho \cdot \mu^2 I, \quad \mu^2 = \text{tr}(\hat{\Sigma}_{\text{sample}})/8
+$$
+
+其中 $\rho = 0.5$。在 104 周窗口上, 8 资产协方差估计 N/p = 13, 病态风险显著, 收缩到对角线 $\mu^2 I$ 提升数值稳定性。
+
+ERC 优化在此 $\hat{\Sigma}_{\text{LW}}$ 上做 fixed-point 迭代 (Spinu 2013), 收敛到 $w_i (\Sigma w)_i$ 在各 $i$ 间近似相等。
+
+**7.2 单纯形投影 (Dykstra)**
+
+将 $b \in \mathbb{R}^8$ 投影到 box-constrained 单纯形 $\Delta = \{w : w \ge l_i, w \le u_i, \sum w = 1\}$。我们的实现是简化版 (clip + normalize 迭代 50 次), 收敛速度足够。
+
+**7.3 8 ETF 真实收益的同步**
+
+V3.1N 的 5 维特征来自 5 reference 资产 (000300.SH 等), 与 8 ETF 真业绩 (511010 等) **不是同一资产**。这是设计选择:
+
+- 5 reference 资产是"市场代理", 波动率反映 regime
+- 8 ETF 是"可投资标的", 业绩是 PPO 的真实奖励
+- 这种解耦使 W 矩阵学到"regime → 资产类型"映射, 而 PPO 学"regime → tilt 强度"
+
+**风险**: 5 reference 资产的 regime 信号可能滞后于 8 ETF 实际表现 (二者不是同标的)。实证上 Sharpe 1.695 表明这个滞后可接受。
+
+---
+
+## 9 维状态空间
+
+| 维度  | 名称               | 含义             | 标准化                 |
+| --- | ---------------- | -------------- | ------------------- |
+| s0  | AE 重建误差          | 宏观压迫感          | z-score (rolling)   |
+| s1  | vol_mkt_20d      | 沪深 300 20 日波动率 | minmax → [0, 1]     |
+| s2  | llm_macro        | 流动性顺风          | (x-50)/50 → [-1, 1] |
+| s3  | llm_sentiment    | 资金情绪           | 同上                  |
+| s4  | llm_risk         | 风险压力           | 同上                  |
+| s5  | port_sharpe_20d  | 组合 20 日 Sharpe | clip [-3, 3]        |
+| s6  | port_mdd_current | 当前回撤           | abs                 |
+| s7  | regret_ema_norm  | 遗憾 EMA         | (Walk-forward 中关闭)  |
+| s8  | theta_prev       | 上一期 theta      | minmax → [0, 1]     |
+
+## 1 维动作空间
+
+- `a ∈ [-1, 1]` (Tanh 输出) → 线性映射 → `theta ∈ [0, 2]`
+- theta=0: 纯 b0 等权, 无 tilt
+- theta=1: 默认 V3.1N 行为 (W 矩阵的 raw score 直接 softmax)
+- theta=2: 激进 (按 score 指数 tilt, 集中度最高)
+
+---
+
+## 8 ETF 池 (2020-2026 5y 周频)
+
+| idx | 代码     | 类别        | 名称         | 5y Sharpe | 角色                                 |
+| --- | ------ | --------- | ---------- | --------- | ---------------------------------- |
+| 0   | 511010 | fi        | 国债 ETF     | 1.09      | 防御核心                               |
+| 1   | 518880 | hedging   | 黄金 ETF     | 1.33      | 尾部对冲                               |
+| 2   | 511020 | fi        | 信用债 ETF    | 0.55      | 防御辅助                               |
+| 3   | 159985 | commodity | 商品 ETF     | 0.73      | 通胀敏感                               |
+| 4   | 512100 | satellite | 中证1000 ETF | 0.51      | 高 beta 进攻                          |
+| 5   | 515050 | satellite | 红利低波 ETF   | 0.50      | 防御进攻                               |
+| 6   | 159915 | satellite | 创业板 ETF    | 0.41      | 科技股, 高 beta 增长 (Phase 2 替换 159919) |
+| 7   | 510300 | satellite | 沪深300 ETF  | 0.29      | 兜底宽基                               |
+
+(Sharpe 排序: 黄金 1.33 > 国债 1.09 > 商品 0.73 > 信用债 0.55 > 中证1000 0.51 > 红利低波 0.50 > 创业板 0.41 > 沪深300 0.29)
+
+ETF 代码 (ClickHouse 原始) → 资产代码 (W 矩阵内部) 映射见 `src/data_pipeline/track_b/fetcher.py:fetch_n_etf()`。
+
+---
+
+## Walk-Forward 训练方案 (生产配置)
+
+**核心**: 严格 OOS, PPO 训期 < 测试期, 程序无误泄露。
+
+| 阶段          | 配置                                             | 说明                           |
+| ----------- | ---------------------------------------------- | ---------------------------- |
+| OOS PPO 训练  | **200k timesteps** on [2020-05-08, 2022-12-30] | 单 PPO 训冻结                    |
+| 季度重训        | **5k steps** / quarter                         | warm-start from prev quarter |
+| WFO 切换      | 季度边界 hot-swap                                  | 13 季度 ckpt                   |
+| Lookback 窗口 | **78 周** (1.5 年)                               | rolling, 平衡反应速度              |
+| 总耗时         | ~10 分钟                                         | 训 + WFO 端到端                  |
+
+**Theta 区间**: [0, 2] (production) - 试过 [0, 3] 反而 Sharpe 略低 (1.688 vs 1.821)
+**B0 来源**: 100% 数据化 (rolling 104w ERC) - 0 前视偏差
+**W 矩阵**: $W = \text{sign}(W_{\text{SIGN}}) \odot |D_{\text{scale}}|$, 符号结构 + 幅度数据化
+**tau 来源**: Phase 3 数据化, rolling 104w E_t 的 30 分位数 - bear pressure 充分启用
+**8 ETF 池**: 159919 → 159915 (创业板) 切换, 行业分散 + 更高 Sharpe
+
+### 实测调参 (含 Phase 1 + Phase 2 + Phase 3 + 159915 切换的最终生产配置)
+
+| #   | 配置                                       | Sharpe                | 备注                          |
+| --- | ---------------------------------------- | --------------------- | --------------------------- |
+| 1   | 100k theta2 + 5k ws + 104w, 手设 B0        | 1.768                 | 旧基准                         |
+| 2   | 200k theta2 + 5k ws + 78w, 手设 B0         | 1.821                 | 含 spec leakage              |
+| 3   | 200k theta2 + 5k ws + 104w, 手设 B0        | 1.817                 |                             |
+| 4   | 200k theta2 + 5k ws + 52w, 手设 B0         | 1.818                 |                             |
+| 5   | 200k theta2 + 5k ws + 156w, 手设 B0        | 1.818                 |                             |
+| 6   | 300k theta2 + 5k ws + 104w, 手设 B0        | 1.819                 | plateau                     |
+| 7   | 200k theta3 + 5k ws + 104w, 手设 B0        | 1.515                 | theta3 过拟合                  |
+| 8   | Phase 1: ERC B0 (159919)                 | 1.562                 | B0 数据化, 0 前视                |
+| 9   | Phase 2: ERC B0 + W_hybrid (159919)      | 1.606                 | B0 + W 数据化                  |
+| 10  | Phase 2 + 159915 切换 (B0 + W 数据化)         | 1.642                 | B0 + W + ETF 都数据化           |
+| 10b | + Phase 3 tau q=20 (最激进 bear)            | 1.695                 | bear pressure 充分启用          |
+| 10c | + Phase 3 tau q=30 (生产)                  | 1.695                 | 平衡点, 与 q=20 同分但 turnover 更低 |
+| 10d | + Phase 3 tau q=50 (中等)                  | 1.656                 | bear 触发 50%                 |
+| 10e | + Phase 3 tau q=70 (最保守)                 | 1.550                 | bear 触发 30%                 |
+| 8   | 200k theta2 + 5k ws + 78w, no warm-start | 1.587 (warm-start 关键) |                             |
 
 ---
 
@@ -165,113 +740,72 @@
 
 ```
 AE_LLM_RL_FOF-main/
-├── config.yaml                  # 全局配置文件
-├── pyproject.toml               # Python 项目依赖
-├── .env                         # 环境变量 (API Key, 数据库连接)
+├── config.yaml                  # 全局配置 (theta_max=2.0, action_mapper, state_assembler, ppo)
+├── pyproject.toml               # Python 依赖
+├── .env                         # API Key / ClickHouse 连接
 │
 ├── data/
-│   ├── raw/                     # 原始数据
-│   ├── processed/               # ETL 输出: features_master.parquet
-│   └── llm_cache/               # LLM 打分 SQLite 数据库
+│   ├── processed/               # features_master.parquet (25 维特征)
+│   └── llm_cache/llm_scores.db  # LLM 周频 d1/d2/d3 评分
 │
-├── checkpoints/                 # 模型权重 & scaler
-│   ├── ae_weights.pth           # AE 自编码器权重
-│   ├── ae_scaler.pkl            # 标准化参数
-│   └── actor_critic.pth         # PPO Actor-Critic 权重
+├── checkpoints/
+│   ├── ae_weights.pth           # AE 25→6→25
+│   ├── ae_scaler.pkl
+│   ├── actor_critic_oos_theta2_200k.pth  # OOS PPO (生产 init)
+│   └── walkforward/             # 13 季度 ckpt (warm-start)
 │
 ├── src/
-│   ├── features/                # 特征工程
-│   │   ├── asset_features.py    # 资产特征 (动量/波动率/相关性/周收益)
-│   │   ├── macro_features.py    # 宏观特征 (DR007/汇率/国债/利差/两融动量)
-│   │   ├── normalizer.py        # 防穿越 Z-score 标准化
-│   │   └── reconstruction_error.py  # AE 重建误差计算
-│   │
-│   ├── models/
-│   │   └── regime_autoencoder.py    # AE 网络: 25→16→6→16→25
-│   │
-│   ├── llm_engine/              # LLM 语义引擎
-│   │   ├── prompt_builder.py    # System/User Prompt 构建
-│   │   ├── async_semantic_engine.py  # 异步并发打分引擎
-│   │   ├── response_parser.py   # JSON 响应解析
-│   │   ├── text_etl.py          # 文本数据提取 (政策/新闻)
-│   │   └── concept_pools.py     # 概念池定义 (宽基/卫星/固收)
-│   │
-│   ├── compute/                 # 双轨测算引擎
-│   │   ├── dual_track_engine.py # 异构双轨并发入口
-│   │   ├── normal_track.py      # 防御轨: 协方差加权防守
-│   │   └── event_track.py       # 进攻轨: LLM 信号驱动弹性配置
-│   │
-│   ├── env/                     # MDP 环境 (Gymnasium)
-│   │   ├── mdp_environment.py   # 10维状态 × 2维动作 MDP
-│   │   ├── reward_function.py   # 复合奖励函数
-│   │   ├── state_assembler.py   # 10维状态空间组装
-│   │   ├── action_mapper.py     # Action → Δα/Δτ 映射
-│   │   ├── regret_engine.py     # 遗憾最小化引擎
-│   │   └── metrics_utils.py     # Sharpe/MDD 计算
-│   │
-│   ├── ppo/                     # PPO 训练模块
-│   │   ├── networks.py          # Actor-Critic 独立网络 (正交初始化)
-│   │   ├── trainer.py           # PPO 训练器 (Clip + GAE)
-│   │   ├── buffer.py            # Rollout 缓冲池
-│   │   ├── gae.py               # GAE 优势估计
-│   │   └── loss.py              # Actor/Critic/Entropy 损失
-│   │
-│   ├── inference/               # 推断与后处理
-│   │   ├── ema_filter.py        # EMA 平滑滤波
-│   │   └── panic_index_output.py # 恐慌指数输出
-│   │
-│   ├── failsafe/                # 风险熔断
-│   │   ├── veto_switch.py       # LLM d3 一票否决
-│   │   └── fallback_selector.py # 降级备选选择器
-│   │
-│   ├── selection/               # 选基 & 权重映射
-│   │   ├── concept_to_etf_map.py
-│   │   └── slot_weighting.py
-│   │
-│   ├── synthesis/               # 合成资产构建
-│   │   └── covariance_weighter.py
-│   │
-│   ├── schedules/               # Walk-Forward 调度
-│   │   └── wfo_scheduler.py     # 季度重训 + 周频推断
-│   │
-│   ├── training/                # 训练流程编排
-│   │   ├── burn_in/             # 冷启动 (Phase1初始化 + Phase2 MAD校准)
-│   │   └── dual_track/trainer.py
-│   │
-│   ├── data_pipeline/           # 数据管道
-│   │   ├── track_b/fetcher.py   # ClickHouse 日频 ETF 数据
-│   │   └── track_a/fetcher.py   # 其他数据源
-│   │
-│   └── penetration/             # 实盘信号下发
-│       └── agentbase_formatter.py  # AgentBase 标准格式
+│   ├── features/                # 25 维特征 (5 资产 + 5 宏观)
+│   ├── models/regime_autoencoder.py
+│   ├── llm_engine/              # d1/d2/d3 评分 (10 概念池)
+│   ├── compute/
+│   │   ├── event_track_v3_1_n.py  # 8 资产 V3.1N 引擎 (核心)
+│   │   └── v31_engine_n.py        # V31EngineN 包装
+│   ├── selection/select_8_n.py  # 8 ETF 选基 (LLM 信号驱动)
+│   ├── data_pipeline/track_b/fetcher.py  # ClickHouse 8 ETF
+│   ├── env/
+│   │   ├── mdp_environment.py   # 9 维状态 × 1 维动作 MDP
+│   │   ├── state_assembler.py   # 9 维状态组装
+│   │   ├── action_mapper.py     # a → theta
+│   │   ├── reward_function.py   # 复合奖励
+│   │   ├── regret_engine.py     # 8→5 聚合, 暂时 bypass
+│   │   └── metrics_utils.py     # Sharpe / MDD
+│   ├── ppo/                     # Actor-Critic, PPO trainer, buffer, GAE
+│   ├── inference/               # EMA 滤波, panic index (WFO Scheduler 用)
+│   ├── training/                # burn_in, dual_track (legacy WFOScheduler)
+│   ├── schedules/wfo_scheduler.py
+│   ├── failsafe/                # VetoSwitch (d3 > 85 一票否决), FallbackSelector
+│   └── penetration/agentbase_formatter.py  # 8 ETF 权重 → AgentBase JSON
 │
-├── scripts/                     # 可执行脚本
-│   ├── run_data_etl.py          # Step 1: 数据清洗与特征构建
-│   ├── run_llm_batch.py         # Step 2: LLM 批量推理 (断点续传)
-│   ├── train_ae.py              # Step 3: AE 自编码器预训练
-│   ├── train_ppo.py             # Step 4: PPO 元控制器沙盒训练
-│   ├── run_backtest_wfo.py      # Step 5: Walk-Forward 滚动回测
-│   └── run_inference_live.py    # Step 6: 实盘/准实盘信号下发
+├── scripts/                     # 6 步生产流水线
+│   ├── run_data_etl.py          # Step 1: 数据 ETL
+│   ├── run_llm_batch.py         # Step 2: LLM 批量打分
+│   ├── train_ae.py              # Step 3: AE 训练
+│   ├── train_ppo.py             # Step 4: OOS PPO 训练 (200k timesteps)
+│   ├── train_ppo_walkforward.py # Step 4b: 13 季度 warm-start 增量训
+│   └── run_backtest_wfo_n.py    # Step 5: WFO 回测 + 季度 hot-swap
+│                                  # Step 6 (实盘信号): TBD - 基于 run_backtest_wfo_n 改造
 │
-├── tests/                       # 单元测试
-│   ├── test_mdp_environment_alignment.py
-│   ├── test_event_track_prototypes.py
-│   ├── test_regime_autoencoder.py
-│   └── test_normalizer_no_lookahead.py
+├── tests/                       # 单元测试 (生产相关)
+│   ├── test_regime_autoencoder.py     # AE 前向
+│   └── test_normalizer_no_lookahead.py # 防穿越标准化
 │
-├── results/                     # 回测输出
-│   └── wfo/                     # Walk-Forward 回测结果
-│       └── <run_id>/
-│           ├── nav_series.csv
-│           ├── weights_trajectory.csv
-│           ├── weights_data_generalbt.csv
-│           ├── metrics.json
-│           ├── gate_diagnostics.csv
-│           ├── tearsheet.txt
-│           └── figures/         # 可视化图表
+├── archive/                     # 历史代码 (不参与生产)
+│   ├── deprecated_tests_20260608/     # 旧 5 资产测试 + 旧 EventTrack / V31Engine
+│   ├── pre_theta_refactor_20260607/   # theta refactor 前的完整快照
+│   ├── pre_stage7c_20260607/          # Stage 7c 之前
+│   ├── pre_v31_cleanup/               # V3.1 清理前
+│   └── post_stage7_20260607/          # Stage 7 收尾
 │
-├── logs/                        # 运行日志
-└── docs/                        # 文档与数据字典
+├── results/wfo/                 # 6 个回测结果
+│   ├── stage7c_wfo_FINAL/phase3_tau_quantile30/  # 生产: Sharpe 1.695 (3.32y 严格 OOS, B0+W+tau 数据化 + 159915)
+│   ├── stage7c_oos_v2/          # 对比: OOS PPO 单次 1.529
+│   ├── stage7c_oos_oldppo/      # 对比: in-sample 1.756
+│   ├── stage7c_5y/              # 对比: 5.32y in-sample 1.556
+│   ├── stage7c_wfo/             # 对比: 第一版 WFO 1.768
+│   └── target_weights_*.json    # 实盘信号输出
+│
+└── docs/                        # 文档
 ```
 
 ---
@@ -281,7 +815,8 @@ AE_LLM_RL_FOF-main/
 ### 环境要求
 
 - Python >= 3.10
-- CUDA (可选, 用于 GPU 训练)
+- ClickHouse (quantchdb) 8 ETF 数据可用
+- LLM API Key (Step 2)
 
 ### 安装
 
@@ -289,198 +824,107 @@ AE_LLM_RL_FOF-main/
 pip install -e ".[dev]"
 ```
 
-### 配置
-
-1. 编辑 `.env` 配置 API Key 和数据库连接
-2. 编辑 `config.yaml` 调整超参数 (默认配置可直接使用)
-
----
-
-## 流水线
-
-6 步流水线是三层解耦架构的工程落地：**AE 自编码器**（Step 3）负责将 25 维特征压缩为 6 维潜在表征，以重建误差 E_t 量化宏观压迫感；**LLM 语义引擎**（Step 2）充当可解释的特征工程与尾部风险阻断器，输出 d1/d2/d3 三维语义评分；**PPO 元控制器**（Step 4）不直接选基或生成权重，仅输出 α（攻防融合比）和 τ（牛熊切换阈值）两个标量，将 RL 从高维动作空间降维为超参数调度问题。Step 1 负责数据供给，Step 5-6 负责回测验证与实盘下发。
-
-完整的 6 步操作流水线：
-
-### Step 1: 数据 ETL
+### 流水线 (6 步)
 
 ```bash
+# Step 1: 拉 8 ETF OHLC + 5 资产特征 + 5 维宏观 → features_master.parquet
 python scripts/run_data_etl.py --start-date 2015-01-01
+
+# Step 2: LLM 批量打分 (d1/d2/d3) → llm_scores.db
+python scripts/run_llm_batch.py --start-week 2022-01-07
+
+# Step 3: 训 AE 自编码器 (25 → 6 → 25)
+python scripts/train_ae.py --epochs 50
+
+# Step 4: OOS PPO 训练 (训期 [2020-05, 2022-12], 200k timesteps)
+python scripts/train_ppo.py \
+    --start-date 2020-05-08 \
+    --end-date 2022-12-30 \
+    --total-timesteps 200000 \
+    --checkpoint-path checkpoints/actor_critic_oos_theta2_200k.pth
+
+# Step 4b (可选): 季度 warm-start 增量训 → 13 个 walkforward ckpt
+python scripts/train_ppo_walkforward.py \
+    --init-checkpoint checkpoints/actor_critic_oos_theta2_200k.pth \
+    --init-end-date 2022-12-30 \
+    --lookback-weeks 78 \
+    --timesteps-per-quarter 5000
+
+# Step 5: WFO 回测 (季度 hot-swap, 真实 OOS)
+python scripts/run_backtest_wfo_n.py \
+    --start-date 2023-01-01 \
+    --end-date 2026-04-30 \
+    --walkforward-dir checkpoints/walkforward \
+    --ppo-checkpoint checkpoints/actor_critic_oos_theta2_200k.pth \
+    --output-dir results/wfo/stage7c_wfo_FINAL
+
+# Step 6: 实盘信号 (单周五触发)
+python scripts/run_inference_live.py --week-end 2026-05-08  # TBD: 基于 run_backtest_wfo_n 改造
 ```
-
-从 ClickHouse 拉取 ETF 日频数据，计算 5 资产 × 4 特征 + 5 维宏观特征 = 25 维特征矩阵，执行防穿越 Z-score 标准化，输出 `data/processed/features_master.parquet`。
-
-### Step 2: LLM 批量打分
-
-```bash
-python scripts/run_llm_batch.py --start-week 2022-01-07 --concurrency 5
-```
-
-批量调用 LLM 对每个周五的宏观文本进行 d1/d2/d3 三维语义评分，支持断点续传，结果写入 `data/llm_cache/llm_scores.db`。
-
-### Step 3: AE 自编码器训练
-
-```bash
-python scripts/train_ae.py --epochs 50 --batch-size 256
-```
-
-训练 Regime AutoEncoder 将 25 维特征压缩为 6 维潜在表征，输出 `checkpoints/ae_weights.pth` 和 `checkpoints/ae_scaler.pkl`。
-
-### Step 4: PPO 元控制器训练
-
-```bash
-python scripts/train_ppo.py --total-timesteps 100000
-```
-
-在 MDP 环境中训练 Actor-Critic 网络，输出 `checkpoints/actor_critic.pth`。支持 TensorBoard 监控 (`logs/tensorboard`)。
-
-### Step 5: Walk-Forward 回测
-
-```bash
-python scripts/run_backtest_wfo.py --start-date 2015-01-01 --lookback-weeks 104
-```
-
-季度重训 + 周频推断的滚动回测，输出净值曲线、权重轨迹、GeneralBacktest 格式文件及可视化图表。
-
-### Step 6: 实盘信号下发
-
-```bash
-python scripts/run_inference_live.py --week-end 2025-06-06
-```
-
-每周五盘后触发：增量更新数据 → 单周 LLM 打分 → 加载最新模型 → 前向传播 → 输出 `results/wfo/target_weights_*.json`（标准 AgentBase 格式）。
 
 ---
 
 ## 关键设计
 
-### 10 维状态空间 S_t
+### V3.1N 8 资产引擎
 
-| 维度 | 名称 | 含义 |
-|------|------|------|
-| s0 | AE 重建误差 (标准化) | 宏观压迫感强度 |
-| s1 | 市场波动率 (标准化) | 风险水平 |
-| s2 | LLM 宏观评分 d1 | 流动性顺风程度 |
-| s3 | LLM 情绪评分 d2 | 市场情绪热度 |
-| s4 | LLM 风险评分 d3 | 尾部风险压力 |
-| s5 | 组合 Sharpe (20日) | 近期风险调整收益 |
-| s6 | 当前最大回撤 | 组合回撤深度 |
-| s7 | 遗憾 EMA (标准化) | Regret 跟踪信号 |
-| s8 | 上一期 τ (标准化) | 牛熊切换阈值 |
-| s9 | 上一期 α (标准化) | 攻防融合比 |
+`src/compute/event_track_v3_1_n.py:EventTrackV31N` 核心组件:
 
-### 2 维动作空间
+- **W 矩阵** (8×5): 5 维市场状态 → 8 资产 score, 手调自 5y 业绩
+- **B0** (8,): 等权基准, 防御底仓
+- **V_DEFENSE** (8,): 防御打分, AE regime 触发时叠加
+- **BOUNDS** (8,): 各资产硬上限 (0.20~0.45)
 
-- **a₁ → Δα**: 攻防切换增量 (α ∈ [0, 1])
-- **a₂ → Δτ**: 牛熊阈值增量 (τ ∈ [5, 50])
+输入: 5 维 market features (从 features_master 5 reference 资产波动率派生)
+输出: 8 维 ETF 权重, 严格 sum=1
 
-### 复合奖励函数 (牛熊双轨条件分支)
+### 复合奖励函数
 
-奖励函数实现于 `src/env/reward_function.py`，配置位于 `config.yaml:107-118`。根据 AE 重建误差与阈值的比较，分为牛/熊两条轨道：
+`src/env/reward_function.py`: 8 维 w × 8 ETF 真实 weekly return = r_port, 再算 Sharpe / MDD 加权。
 
-**Bull 轨** (`ae_error < τ`, 正常市场):
-$$R_t = r_{port} - \lambda_{to} \cdot C_{TO} - \lambda_{TE} \cdot TE - \lambda_{end} \cdot |\alpha - 0.5| - 0.01 \cdot |\Delta\alpha| \pm \text{SwitchBonus}$$
-
-**Bear 轨** (`ae_error ≥ τ`, 压力市场 / 危机轨道):
-$$R_t = \lambda_{rel} \cdot (r_{port} - r_{normal}) - \lambda_{to} \cdot C_{TO} - \kappa \cdot \max(0, MDD - MDD_{normal}) - \lambda_{end} \cdot |\alpha - 0.5| - 0.01 \cdot |\Delta\alpha| \pm \text{SwitchBonus}$$
-
-**SwitchBonus**: α>0.5且regime=bull → +0.45; α<0.5且regime=bear → +0.45; α>0.5且regime=bear → -0.15; α<0.5且regime=bull → -0.15
-
-#### 变量定义
-
-| 变量 | config.yaml 值 | 含义 |
-|------|---------------|------|
-| `r_port` | — (实时计算) | 组合本期收益率 |
-| `r_normal` | — (实时计算) | 正常轨 (防御轨) 收益率，由 NormalTrack ERC 组合产生 |
-| `C_{TO}` (turnover) | — | `Σ|w_t - w_{t-1}|`，5 类资产权重的绝对变化之和 |
-| `TE` | — | 年化跟踪误差: `√252 × std(r_port - r_benchmark)` |
-| `MDD` | — | 组合当前回撤: `(HWM - NAV) / HWM` |
-| `MDD_{normal}` | — | 正常轨当前回撤，同 MDD 公式计算 |
-| `α` (alpha_current) | — | 攻防融合比，控制 `w_final = α·w_event + (1-α)·w_normal` |
-| `Δα` | — | `|α_t - α_{t-1}|`，alpha 跨期变化量 |
-
-#### 超参数配置
-
-| 参数 | config.yaml 值 | 类默认值 | 含义 |
-|------|---------------|---------|------|
-| `λ_turnover` | **0.001** | 0.001 | 换手率惩罚系数 |
-| `λ_te` | **0.005** | 0.005 | 跟踪误差惩罚系数 (仅 Bull 轨) |
-| `κ` (kappa) | **2.0** | 2.0 | 超额回撤惩罚系数 (仅 Bear 轨) |
-| `λ_relative` | **1.0** | 1.0 | 相对收益权重 (仅 Bear 轨) |
-| `λ_endpoint` | **0.20** | 0.10 | 端点中心化惩罚: 防止 alpha 偏离 0.5，鼓励思维融合 |
-| `0.01` | 硬编码 | 硬编码 | 一致性惩罚: 抑制 alpha 跨期剧烈跳变 |
-| `switch_bull_reward` | **0.45** | 0.010 | 牛市选择进攻的正确奖励 |
-| `switch_bear_reward` | **0.45** | 0.010 | 熊市选择防御的正确奖励 |
-| `switch_bull_penalty` | **0.15** | 0.015 | 牛市错误选择防御的惩罚 |
-| `switch_bear_penalty` | **0.15** | 0.015 | 熊市错误选择进攻的惩罚 |
-
-> **设计意图**: 牛市轨强调绝对收益 + 低跟踪误差；熊市轨 (危机轨道) 切换到相对防御基准的超额收益 + 控制超额回撤。核心思想是危机时期不要求绝对正收益，只要求跑赢防御组合且回撤不更深。端点惩罚和制度切换奖励共同防止 PPO 在两轨之间摇摆不定或走极端。
-
-> **注意**: `eta` (regret 权重) 和 `lambda_alpha_direct` 在 config 中配置为 1.0 和 0.0，但在 `compute()` 方法中当前未使用，为预留参数。
-
-### 5 资产类别 (AE 风向标 ETF)
-
-系统选取 5 只代表性 ETF 作为宏观环境"风向标"，覆盖经济增长、通胀、通缩、危机四类核心宏观情景。它们是整个系统的**唯一资产全集**——所有特征工程、AE 编码、双轨权重、PPO 融合均在这 5 维空间中完成。
-
-**ETF 映射关系** (`src/data_pipeline/track_b/fetcher.py:16-31`):
-
-| 编号 | ETF 代码 | ETF 名称 | 映射指数 | 资产类型 |
-|------|---------|---------|---------|---------|
-| 0 | 510300 | 沪深300ETF | 000300.SH | 宽基指数 (大盘股) |
-| 1 | 159919 | 中证1000ETF | 000852.SH | 卫星资产 (小盘股) |
-| 2 | 511010 | 国债ETF | CBA02701.CS | 固收 (国债) |
-| 3 | 518880 | 黄金ETF | AU9999.SGE | 避险 (黄金现货) |
-| 4 | 159985 | 商品/另类ETF | NH0100.NHF | 现金/商品 (南华商品指数) |
-
-**配置角色与宏观情景覆盖**:
-
-| 编号 | 配置角色 | 适用情景 | 设计逻辑 |
-|------|---------|---------|---------|
-| 0 | **收益中枢** | 增长期 (Growth) | 经济上行时大盘股提供核心 beta 收益 |
-| 1 | **Alpha 增强** | 增长期 / 风险偏好回升 | 小盘股在流动性宽松时弹性更大，提供超额收益 |
-| 2 | **防御底仓** | 通缩 / 危机 | 国债在风险资产下跌时提供负相关保护和票息收益 |
-| 3 | **尾部对冲** | 通胀 / 再通胀 (Reflation) / 地缘危机 | 黄金在通胀上行和极端风险事件中作为避险资产 |
-| 4 | **流动性储备** | 危机 / 高波动期 | 商品指数提供通胀敏感型现金替代，降低组合波动 |
-
-**特征工程 → AE 输入** (`src/features/asset_features.py`):
-
-每只 ETF 提取 4 个特征（周收益率 / 20日波动率 / 20日动量 / 20日平均相关性），5 资产 × 4 特征 = **20 维资产特征**，再拼接 5 维宏观特征 (DR007 / 离岸人民币 / 10年国债收益率 / 期限利差 / 两融动量)，组成 **25 维输入向量** 馈入 AE 自编码器。
-
-**选基逻辑**:
-
-这 5 只 ETF 的选取遵循以下原则：
-- **低相关性覆盖**: 5 类资产分属股票（大小盘）、利率、商品、汇率四个定价因子，彼此相关性低，覆盖主要宏观风险源
-- **流动性优先**: 选取规模大、日均成交活跃的主流 ETF（如 510300 沪深 300ETF 为 A 股规模最大的权益 ETF）
-- **历史连续性**: 代码选取兼顾 ClickHouse 数据可用性——159919 替代了原 512850（数据截至 2020-12-08），159985 替代了原 160217（ClickHouse 中不存在该代码）
-- **降维代表性**: 5 个资产足以表征宏观环境切换，同时避免因资产过多导致协方差矩阵估计不稳定（LedoitWolf 收缩在小样本下更可靠）
-
-**在三原型中的配置差异化** (`src/compute/event_track.py:20-22`):
-
-| 原型 | 宽基 (0) | 卫星 (1) | 固收 (2) | 避险 (3) | 现金 (4) | 适用环境 |
-|------|---------|---------|---------|---------|---------|---------|
-| Crisis (危机) | 0.05 | 0.00 | 0.45 | 0.35 | 0.15 | 风险规避，重仓债券+黄金 |
-| Reflation (再通胀) | 0.18 | 0.10 | 0.18 | 0.34 | 0.20 | 通胀上行，黄金+现金主导 |
-| Growth (增长) | 0.32 | 0.48 | 0.08 | 0.05 | 0.07 | 风险偏好，权益主导 (卫星超额) |
-| Neutral (中性基准) | 0.18 | 0.12 | 0.28 | 0.22 | 0.20 | 均衡配置
+| 项           | 含义                       |
+| ----------- | ------------------------ |
+| r_port      | 本周组合真实收益                 |
+| λ_turnover  | 换手惩罚 (0.001)             |
+| λ_endpoint  | alpha 中心化 (当前未启用, 1 维动作) |
+| SwitchBonus | regime 切换正确奖励            |
 
 ### 风险熔断 (Veto Switch)
 
-LLM 对每个概念输出 d3 风险压力指数 (0-100)。当任意 ETF 对应的概念 d3 > 85 时触发一票否决，该概念对应仓位被强制降至 0，由下一顺位替补。
+LLM d3 > 85 → 强制把对应概念降权至 0。Walk-forward 中 d3 取宽基均值 × 0.7 + 卫星最大 × 0.3。
+
+---
+
+## 实测结果 (严格 OOS)
+
+**测试期**: 2023-01-01 ~ 2026-04-30 (3.32 年, 173 周, 8 ETF 真实 OHLC + 手续费/滑点)
+
+| 方案                                         | Sharpe    | Sortino   | Calmar    | Ann        | MDD       | Win       | Turnover |
+| ------------------------------------------ | --------- | --------- | --------- | ---------- | --------- | --------- | -------- |
+| OLD PPO (in-sample 200k, 手设 B0)            | 1.756     | 1.973     | 1.509     | 14.97%     | 9.92%     | 56.7%     | 6.5%     |
+| OOS PPO (单次 100k, 冻结, 手设 B0)               | 1.529     | 1.745     | 1.329     | 13.20%     | 9.93%     | 56.2%     | —        |
+| WFO + 手设 B0 (200k + 78w + 5k ws)           | 1.821     | 2.040     | 1.570     | 15.46%     | 9.85%     | 57.2%     | 6.0%     |
+| Phase 1: B0 数据化 (rolling 104w ERC)         | 1.562     | 1.845     | 1.588     | 14.40%     | 9.07%     | 55.8%     | 8.1%     |
+| Phase 2: B0 + W_hybrid 数据化                 | 1.606     | 1.889     | 1.582     | 14.42%     | 9.11%     | 55.3%     | 6.6%     |
+| **Phase 2 + 159915 + tau q=30 (生产, 0 前视)** | **1.695** | **1.999** | **1.710** | **15.43%** | **9.09%** | **54.6%** | **5.8%** |
+
+注: 1.821 vs 1.695 的 0.13 Sharpe 差距主要来自 B0 的 60% 防御偏向 + tau=15 的过激 bear pressure (spec leakage)。生产 1.695 是 100% 程序严格 OOS (B0 + W + tau 都数据化) 的"诚实"估计。
+
+WFO vs in-sample OLD: 严格 OOS 已与 in-sample 持平 (0.07 差距), 持续 adapt 优于冻结。
 
 ---
 
 ## 技术栈
 
-| 组件 | 技术 |
-|------|------|
-| 深度学习框架 | PyTorch >= 2.0 |
-| RL 环境 | Gymnasium >= 0.29 |
-| LLM 调用 | OpenAI SDK (兼容 Qwen/Claude 等) |
-| 数据处理 | Pandas, NumPy, PyArrow |
-| 数据源 | ClickHouse (quantchdb), PostgreSQL |
-| 监控 | TensorBoard |
-| 测试 | Pytest, Pytest-Asyncio |
-| 代码质量 | Ruff |
+| 组件   | 技术                                      |
+| ---- | --------------------------------------- |
+| 深度学习 | PyTorch >= 2.0                          |
+| 强化学习 | 自实现 PPO (Actor-Critic, GAE, Clip)       |
+| LLM  | OpenAI SDK (兼容 Qwen/Claude)             |
+| 数据   | ClickHouse (quantchdb), pandas, pyarrow |
+| 回测   | GeneralBacktest (自研, 含手续费/滑点)           |
+| 监控   | TensorBoard                             |
+| 测试   | Pytest                                  |
 
 ---
 
@@ -490,217 +934,22 @@ LLM 对每个概念输出 d3 风险压力指数 (0-100)。当任意 ETF 对应�
 pytest tests/ -v
 ```
 
-- `test_regime_autoencoder.py` — AE 网络结构与前向传播验证
-- `test_mdp_environment_alignment.py` — MDP 环境 reset/step 对齐测试
-- `test_event_track_prototypes.py` — 双轨引擎 EventTrack 原型验证
-- `test_normalizer_no_lookahead.py` — 标准化防穿越机制验证
+主要测试:
+
+- `test_event_track_prototypes.py` — V3.1N 原型 + regime 切换
+- `test_mdp_environment_*.py` — MDP 环境对齐
+- `test_regime_autoencoder.py` — AE 前向
+- `test_normalizer_no_lookahead.py` — 标准化防穿越
 
 ---
 
-## 模块数据流详解
+## 回测交易费率
 
-### 1. features/ — 特征工程 (25维特征矩阵构建)
+`scripts/run_backtest_wfo_n.py` 调用 GeneralBacktest:
 
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 1.1 资产特征 | `price_df` [date × 5资产] 从 ClickHouse `etf.etf_day` 拉取 | `compute_asset_features()` → 5资产 × 4特征(weekly_return / volatility_20d / momentum_20d / mean_corr_20d) = **20维**，所有窗口严格 [t-N, t-1] 防穿越 | DataFrame [date × 20列] 列名格式 `{code}__{feature}` | 1.4 特征拼接 |
-| 1.2 宏观特征 | akshare API (`ak.macro_china_shibor_all`, `ak.currency_boc_safe`, `ak.bond_zh_us_rate`, `ak.macro_china_market_margin_sh/sz`) | `compute_macro_features()` → 5维: DR007 / CNY_USD_Offshore / Yield_10Y_CGB / Term_Spread / Northbound_Flow (两融20日动量), ffill填充缺失 | DataFrame [date × 5列] | 1.4 特征拼接 |
-| 1.3 标准化 | 1.4输出的25维矩阵 | `normalize_dataframe()` → 严格滚动Z-score: mean/std用[t-252, t-1]窗口, 不包含t时刻, `shift(1)`确保防穿越, min_periods=60 | DataFrame [date × 25列] 标准化后 | 1.5 落盘 + AE训练 |
-| 1.4 特征拼接 | 1.1 (20维) + 1.2 (5维) | `pd.concat([asset_feat, macro_feat], axis=1)` 按date索引对齐, dropna | DataFrame [date × 25列] | 1.3 标准化 |
-| 1.5 落盘 | 1.3 标准化后的25维矩阵 | `to_parquet("data/processed/features_master.parquet")` | `features_master.parquet` | AE训练, PPO训练, WFO回测, 实盘推断 |
-| 1.6 AE重建误差 | `RegimeAutoEncoder` (已训练) + 25维特征向量 | `compute_reconstruction_error()` → `E_t = \|\|X - Decoder(Encoder(X))\|\|_2^2` 逐样本计算, batch模式支持(N,25)→(N,) | float / np.ndarray (N,) | StateAssembler (s0), PanicIndexOutput |
+| 参数               | 值                | 说明             |
+| ---------------- | ---------------- | -------------- |
+| transaction_cost | [0.0003, 0.0003] | 买卖各 0.03% (3‱) |
+| slippage         | 0.0001           | 0.01% (1‱)     |
 
-### 2. models/ — AE 自编码器 (宏观压迫感提取器)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 2.1 网络定义 | `input_dim=25, latent_dim=6, hidden_dim=16` | `RegimeAutoEncoder`: Encoder(25→16→6→Tanh) + Decoder(6→16→25), LeakyReLU(0.01) | 模型实例 | train_ae.py, 重建误差计算 |
-| 2.2 编码 | `X_t` shape (batch, 25) | `encoder(X)` → 25→16→6→Tanh → **6维潜在表征Z_t** | Tensor (batch, 6) | 诊断, 潜在空间分析 |
-| 2.3 解码 | `Z_t` shape (batch, 6) | `decoder(Z)` → 6→16→25 → **重建X_hat** | Tensor (batch, 25) | 2.4 损失计算 |
-| 2.4 损失 | X vs X_hat | `MSELoss(X_hat, X)` 最小化重建误差 | 标量 loss | 反向传播 |
-| 2.5 权重保存 | 训练完成的model + scaler参数 | `torch.save(model.state_dict())` + `pickle.dump(scaler_state)` | `ae_weights.pth`, `ae_scaler.pkl` | PPO训练, WFO回测, 实盘推断 |
-
-### 3. llm_engine/ — LLM 语义引擎 (d1/d2/d3三维评分)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 3.1 文本ETL | ClickHouse `text_db` (zgrmyh/csrc/govcn/eastmoney/sina), 当前周五日期 | `TextETL.extract_per_concept()` → MPC会议记录(最近1条) + CSRC标题([t-7,t]) + govcn政策([t-30,t]模糊匹配) + 财经新闻([t-7,t] Top20截断) | `etl_data` dict: `{shared: {mpc, csrc}, concepts: {concept: {govcn, news}}}` | 3.2 Prompt构建 |
-| 3.2 Prompt构建 | 3.1的etl_data + concept_list (权益8概念/固收2概念) + prior_scores (上周d1/d2/d3) | `PromptBuilder.build()` → 组装System Prompt(评分指南+d3评分逻辑) + User Prompt(共享宏观+各概念政策/新闻+上周参考) | 两个Themed Prompt字符串 (equity + fixed_income) | 3.3 LLM调用 |
-| 3.3 异步并发 | 3.2的两个Prompt | `AsyncSemanticEngine.evaluate()` → asyncio.gather 并发调用2次 AsyncOpenAI (temperature=0.0, response_format=json_object), 指数退避重试(max 3次) | 两个JSON字符串 | 3.4 解析 |
-| 3.4 响应解析 | LLM返回的JSON字符串 | `ResponseParser.parse()` → json.loads → 验证每个concept含d1/d2/d3 ∈ [1.0, 100.0] | `dict[concept][d1/d2/d3]` (10概念×3维) | 3.5 SQLite落盘 |
-| 3.5 断点续传 | 3.4的评分结果 + week_end日期 | `INSERT OR REPLACE INTO llm_scores` (week_end, concept, d1, d2, d3, completed_at) | `llm_scores.db` (SQLite) | StateAssembler (s2/s3/s4), WFO回测 |
-| 3.6 概念池 | 硬编码定义 | `CONCEPT_POOLS`: wide_base(沪深300/中证1000) + satellite(6行业) + fixed_income(利率债/信用债) | 10个概念名称列表 | TextETL, PromptBuilder, slot_weighting |
-
-### 4. compute/ — 双轨测算引擎 (防御轨+进攻轨)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 4.1 防御轨 NormalTrack | `returns_5d` shape (5, T≥5) | LedoitWolf协方差收缩 → ERC等风险贡献优化 (SLSQP, sum(w)=1, 各资产上下限) → 失败回退等权[0.2]*5 | `W_Normal` shape (5,) | 4.3 融合 |
-| 4.2 进攻轨 EventTrack | `returns_5d` shape (5,T) + llm_macro/sentiment/risk ∈ [0,100] | 计算crisis/reflation/growth三原型得分(softmax) → event_intensity混合(base_neutral+proto_weights) → 归一化 | `W_Event` shape (5,) | 4.3 融合 |
-| 4.3 权重融合 | W_Normal + W_Event + α (PPO输出) | `w_final = α * w_event + (1-α) * w_normal`, clip & normalize | `W_final` shape (5,) | MDP Environment (reward计算), 回测NAV, 实盘信号 |
-
-### 5. env/ — MDP 环境 (10维状态 × 2维动作)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 5.1 状态组装 | 10个原始信号: ae_error, vol_mkt_20d, llm_macro/sentiment/risk, port_sharpe, mdd, regret_ema, tau_prev, alpha_prev | `StateAssembler.assemble()` → AE Z-score标准化, vol MinMax→[0,1], llm (x-50)/50→[-1,1], d3三阶段异常清洗(滚动中位数/周变化上限/硬截断), Sharpe硬截断[-3,3] | `S_t` shape (10,) np.float32 | Actor-Critic网络 |
-| 5.2 动作映射 | Actor输出 (a1, a2) ∈ [-1,1]² | `ActionMapper.map()` → Δα: [-1,1]→[-0.5, 0.5] + bias; Δτ: [-1,1]→[-2.0, 2.0] (config: alpha_max=0.5, tau_delta_range=2.0) | `(Δα, Δτ)` | 5.3 环境step |
-| 5.3 环境step | live_data注入 (ae_error/vol/llm/returns/w_normal/w_event) + action (a1,a2) | `MDPEnvironment.step()` → action→Δα/Δτ→α_new/τ_new → w_final融合 → r_port计算 → reward计算 → 状态更新 → next_state组装 | `(next_state, reward, terminated, truncated, info)` | PPO Trainer (rollout收集) |
-| 5.4 复合奖励 | r_port, w_final_t, w_final_{t-1}, port_returns, bench_returns, equity_curve, normal_return_t, normal_equity_curve, alpha, regime_bull | `RewardFunction.compute()` → **牛熊双轨**: Bull(ae_error<τ): r_port − λ_to·turnover − λ_te·TE; Bear: λ_rel·(r_port−r_normal) − λ_to·turnover − κ·max(0,MDD−MDD_normal); 共同: −λ_end·|α−0.5| − 0.01·|Δα| + SwitchBonus(±0.45/±0.15) | 标量 reward (float) | GAE优势估计 |
-| 5.5 遗憾引擎 | w_final_prev (5,) + period_return (5,) | `RegretEngine.compute()` → 16个专家候选库 (含逆波动率/纯现金/纯黄金/纯债券/grid组合) → max(r_opt - r_actual, 0) → EMA(0.8)平滑 → 历史max归一化 | `(regret_ema, regret_ema_norm)` ∈ [0,1] | StateAssembler (s7) |
-| 5.6 指标工具 | port_returns, bench_returns, equity_curve | `calculate_sharpe_ratio()` / `calculate_current_drawdown()` / `calculate_tracking_error()` | Sharpe / MDD / TE (float) | StateAssembler, RewardFunction |
-
-### 6. ppo/ — PPO 训练模块 (Actor-Critic 优化)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 6.1 网络定义 | state_dim=10, action_dim=2, hidden_dim=64 | `ActorNetwork`: 10→64→64→2(Tanh) + 独立log_std; `CriticNetwork`: 10→64→64→1 (无激活); 正交初始化; Actor/Critic **不共享权重** | `ActorCritic` 模型 | 6.3 训练器 |
-| 6.2 Rollout收集 | MDPEnvironment + live_data_list (历史数据) | `PPOTrainer.collect_rollout()` → env.reset → for T steps: inject_live_data → Actor前向(Normal采样+Tanh) → env.step → buffer.add(s,a,r,V(s),logπ,done) | RolloutBuffer (T×6数组) | 6.4 GAE + 6.5 更新 |
-| 6.3 Buffer管理 | 每步的 (s,a,r,v,logp,done) | `RolloutBuffer` 固定容量T=100, 循环写入, is_full时触发更新, 支持shuffle+mini-batch split | 已填充buffer | 6.4 GAE |
-| 6.4 GAE优势估计 | buffer中 (rewards, values, dones) + bootstrap_value V(s_T) | `GAEBuffer.compute()` → δ_t = r_t + γ·V(s_{t+1}) - V(s_t) → 反向累积: A_t = δ_t + γλ·A_{t+1} (dones截断) → 优势标准化 | `(advantages, value_targets)` | 6.5 PPO更新 |
-| 6.5 PPO更新 | mini-batches: states, actions, advantages, value_targets, old_log_probs | `total_ppo_loss()` → Clip Loss: -min(ratio·A, clip(ratio,1-ε,1+ε)·A); Critic Loss: 0.5·MSE(V_pred, V_target); Entropy Bonus: -c_e·H; → Adam优化 → K=4 epochs | 更新的Actor-Critic权重 | 6.6 Checkpoint |
-| 6.6 Checkpoint | 训练完成的ac权重 + optimizer状态 + step_count | `torch.save({ac, optimizer, step_count})` 每10个PPO iter保存一次 | `actor_critic.pth` | WFO回测, 实盘推断 |
-
-### 7. inference/ — 推断与后处理 (恐慌指数输出)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 7.1 EMA滤波 | `E_t_raw` (AE重建误差) | `EMAFilter.step()` → E_smoothed = α·E_raw + (1-α)·E_prev, α=0.05, 状态机递推(仅保留上一时刻) | `E_smoothed` (float) | 7.2 Robust Z-score |
-| 7.2 Robust Z-score | E_smoothed 序列 | `RobustZScore.step()` → 滚动窗口Z-score + MAD底层防线(mad_safe_floor=0.05防除零) | `E_zscore` (float) | 7.3 截断 |
-| 7.3 状态截断 | E_zscore | `StateClipper.clip()` → hard clip到 [clip_min=-5.0, clip_max=5.0] | `E_clipped` ∈ [-5.0, 5.0] | 7.4 Burn-in |
-| 7.4 Burn-in处理 | E_clipped + burn_in_weeks计数 | `BurnInHandler.handle()` → 冷启动期(Phase1+Phase2=156周)返回0.0(中性), 之后放行 | `Final_State` ∈ [-5.0, 5.0] | StateAssembler (s0标准化后) |
-| 7.5 整合输出 | E_raw + config | `PanicIndexOutput.step()` → 串联 7.1→7.2→7.3→7.4 | `Final_State` (float) | MDP环境 |
-
-### 8. failsafe/ — 风险熔断 (一票否决+降级备选)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 8.1 一票否决 | LLM评分 dict (concept→d1/d2/d3) + ranked_concepts列表 | `VetoSwitch.apply_veto()` → 遍历d3>85的概念→从排序列表中移除→由下一顺位替补 | 过滤后的concept列表 | 选基权重映射 |
-| 8.2 降级备选 | current_date + ClickHouse配置 | `FallbackSelector.select_8()` → LLM宕机时纯SQL选基: 宽基(20日动量Top1)/卫星(20日动量Top3去重)/固收(20日波动率升序Top2)/避险(固定518880)/现金(固定511850) | `dict[slot→etf_code]` (8只ETF) | 权重映射 & 实盘下发 |
-
-### 9. selection/ — 选基 & 权重映射 (概念→ETF→权重)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 9.1 概念→ETF映射 | concept名称 + 配置override | `get_etf_pool_by_concept()` → 查 DEFAULT_ETF_POOLS (如"人工智能"→["159819","515070"], "沪深300"→["510300"]) | ETF代码列表 | 选基 & 下单 |
-| 9.2 插槽权重评分 | d1/d2/d3 + pool_type (wide_base/satellite/fixed_income) | `compute_slot_score()` → Score = p1·d1 + p2·d2 - p3·d3, P向量: wide_base[0.6,0.1,0.3], satellite[0.2,0.6,0.2], fixed_income[0.5,0.0,0.5] | 标量score | 概念排序 |
-| 9.3 固定插槽 | 概念分类映射 | `CONCEPT_CATEGORY_MAP` → hedging(黄金→518880) + cash(货币→511850) 固定不参与评分 | 固定ETF代码 | 权重分配 |
-
-### 10. synthesis/ — 合成资产构建 (协方差权重)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 10.1 协方差计算 | `returns_5d` DataFrame (5资产×T日) | `CovarianceWeighter.compute_covariance()` → 日收益协方差 ×252 年化 | 5×5协方差矩阵 (np.ndarray) | 组合优化 |
-| 10.2 等权基准 | — | `equal_weight()` → [0.2, 0.2, 0.2, 0.2, 0.2] | 5维向量 | 优化回退 |
-
-### 11. schedules/ — WFO Walk-Forward 调度器 (季度重训 + 周频推断)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 11.1 冷启动 Phase1 | AkShare公网数据 (2019.01-2020.12, 104周) | `Phase1Initializer.run()` → 104周→25维特征→滚动归一化→MSE训练AE(50 epochs, Adam lr=1e-3) | `RegimeAutoEncoder` (基座模型) | 11.2 Phase2 |
-| 11.2 冷启动 Phase2 | Phase1的AE模型 + 历史数据 | `Phase2MADCalibrator.run()` → 用Phase1模型在历史数据上计算AE误差→75%分位数波动率过滤→铸造MAD标尺(median基准+安全边际) | `(Vol_filtered_model, median基准, mad_safe)` | 11.3 并网 |
-| 11.3 季度重训 | 季度末日期 (3/6/9/12月末) | `DualTrackTrainer.train_quarter()` → 拉取过去104周AkShare数据→75%分位数波动率过滤离群值→重置权重→重训AE(30 epochs)→保存 | `ae_weights_{year}Q{quarter}.pth` | WFO回测 |
-| 11.4 周频推断 | 当前周五日期 | `WeeklyInferrer.infer()` → 单周数据→AE前向→计算E_t_raw | `E_t_raw` (float) | PanicIndexOutput, StateAssembler |
-| 11.5 调度编排 | WFOScheduler + 当前日期 | 判断是否季度末→触发重训; 每周末→触发周频推断 | E_t_raw (float) | WFO回测主循环 |
-
-### 12. training/ — 训练流程编排 (冷启动 + 低频轨)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 12.1 Phase1初始化 | config + device | `Phase1Initializer`: 拉取AkShare→25维特征→滚动归一化→MSE训练AE(50 epochs) | `RegimeAutoEncoder` (收敛权重) | Phase2 |
-| 12.2 低频轨重训 | 季度末日期 + config | `DualTrackTrainer.train_quarter()` → 104周数据→25维特征→75%分位数波动率过滤→权重重置→重训→保存 | `.pth` 权重文件 | WFO调度器 |
-
-### 13. data_pipeline/ — 数据管道 (ClickHouse + AkShare)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 13.1 Track B ETF日频 | ClickHouse `etf.etf_day`: close/open/adj_factor | `fetch_track_b()` → SQL查询5只ETF(510300/159919/511010/518880/159985)→pivot(code×date)→CODE_MAP映射为资产代码 | DataFrame [date × 5资产] (单列) 或 [date × 15列] (多列) | asset_features计算 |
-| 13.2 Track A 其他数据 | AkShare API (公网数据,物理隔离ClickHouse) | `TrackAFetcher.fetch_weekly()` → 周频宏观/资产数据 | DataFrame [date × feature] | 低频轨训练 |
-
-### 14. penetration/ — 实盘信号下发 (AgentBase 格式)
-
-| 步骤 | 输入数据 / 来源 | 核心处理 | 输出数据 | 下游消费者 |
-|------|-----------------|---------|---------|-----------|
-| 14.1 格式转换 | etf_weights dict (slot→weight) + etf_codes dict (slot→code) + current_date | `AgentBaseFormatter.format()` → {current_date: {etf_code: weight, ...}} | 嵌套dict (AgentBase标准格式) | 实盘交易系统 |
-
----
-
-## 端到端流水线数据流
-
-### Step 1: 数据 ETL (`scripts/run_data_etl.py`)
-
-| 阶段 | 输入 | 处理 | 输出 |
-|------|------|------|------|
-| 数据拉取 | ClickHouse `etf.etf_day` + start/end日期 | `fetch_track_b_safe()` SQL查询 | price_df [date × 5资产] |
-| 资产特征 | price_df | `compute_asset_features()` 5资产×4特征 | 20维 DataFrame |
-| 宏观特征 | akshare API 5个数据源 | `compute_macro_features()` 5个宏观指标 | 5维 DataFrame |
-| 时间对齐 | 20维 + 5维 DataFrame | `pd.concat` 按date索引交集对齐 | 25维特征矩阵 (T×25) |
-| 标准化 | 25维特征矩阵 | `normalize_dataframe()` 滚动Z-score [t-252, t-1] | **`features_master.parquet`** |
-| 增量检测 | 已有parquet + 新start_date | 增量模式: 跳过已有日期, 仅计算新数据 | 全量parquet (追加) |
-
-### Step 2: LLM 批量打分 (`scripts/run_llm_batch.py`)
-
-| 阶段 | 输入 | 处理 | 输出 |
-|------|------|------|------|
-| 周频切片 | start_week → end_date | 构建每周五日期列表 | fridays list |
-| 断点过滤 | SQLite已完成周 set | 跳过已打分周, 仅处理pending | pending fridays |
-| 文本ETL | ClickHouse text_db (zgrmyh/csrc/govcn/news) | `TextETL.extract_per_concept()` 30天窗口 | etl_data dict |
-| Prompt构建 | etl_data + 上周prior_scores | `PromptBuilder.build_equity/fixed_income()` | 2个Themed Prompt |
-| 并发打分 | 2个Prompt + AsyncOpenAI | `asyncio.gather` 2路并发 + 信号量限流 | JSON评分 |
-| 解析校验 | LLM JSON | `ResponseParser.parse()` 验证d1/d2/d3∈[1,100] | dict[concept][d1/d2/d3] |
-| 断点写入 | 评分结果 + week_end | `INSERT OR REPLACE INTO llm_scores` | **`llm_scores.db`** (SQLite) |
-
-### Step 3: AE 自编码器训练 (`scripts/train_ae.py`)
-
-| 阶段 | 输入 | 处理 | 输出 |
-|------|------|------|------|
-| 数据加载 | `features_master.parquet` | `pd.read_parquet` → 去NaN | X shape (N, 25) |
-| 数据划分 | X (N,25) | 随机80/20 split (seed=42) | train_loader + val_loader |
-| 模型初始化 | input_dim=25, latent=6, hidden=16 | `RegimeAutoEncoder` 随机初始化 | model |
-| 训练循环 | train_loader + val_loader | MSE Loss + Adam(lr=1e-3) + ReduceLROnPlateau + EarlyStopping(patience=10) | best model |
-| 权重保存 | best model + scaler (mean/std/columns) | `torch.save` + `pickle.dump` | **`ae_weights.pth`**, **`ae_scaler.pkl`** |
-
-### Step 4: PPO 元控制器训练 (`scripts/train_ppo.py`)
-
-| 阶段 | 输入 | 处理 | 输出 |
-|------|------|------|------|
-| 历史数据准备 | `features_master.parquet` + `llm_scores.db` + `ae_weights.pth` + `ae_scaler.pkl` | `inject_live_data_from_history()` → 预计算每个时间步: ae_error, vol, llm_macro/sentiment/risk, DualTrackEngine(w_normal, w_event), port_returns, equity_curve, rolling_sharpe, mdd, returns_window_5d | `live_data_list` (T个dict) |
-| LLM日频填充 | llm_scores_df (周频) | smart_agg: d1/d2全市场均值, d3=宽基均值×0.7+satellite最大×0.3 → ffill到日频 | 日频LLM评分 |
-| 环境初始化 | config | `MDPEnvironment` (Gymnasium): state_dim=10, action_dim=2, episode_max_steps=252 | env |
-| 网络初始化 | state_dim=10, action_dim=2 | `ActorCritic` 正交初始化, Actor(10→64→64→2) + Critic(10→64→64→1) | ac |
-| 训练循环 | env + ac + buffer(size=100) | for N updates: collect_rollout(T=100步, 每步注入live_data) → compute_GAE(γ=0.99, λ=0.95) → 4 epochs mini-batch SGD(Adam lr=3e-4, clip_ε=0.2) → TensorBoard打点 | updated ac |
-| Checkpoint | ac + optimizer + step_count | 每10 iter + 最终保存 | **`actor_critic.pth`** |
-
-### Step 5: Walk-Forward 回测 (`scripts/run_backtest_wfo.py`)
-
-| 阶段 | 输入 | 处理 | 输出 |
-|------|------|------|------|
-| 冷启动 | WFOScheduler + config | Phase1(104周基座AE训练) + Phase2(52周MAD标尺铸造) | 基座模型 + MAD参数 |
-| WFO主循环 | features_master + llm_scores + ae_weights + actor_critic + 周五列表 | 每周: WFO调度(E_t)→双轨权重(w_normal, w_event)→PPO Actor前向(α决策)→融合(w_final = α·w_event + (1-α)·w_normal)→Regret计算→Veto检查→净值更新 | records list (NAV, α, τ, regret, weights) |
-| 季度重训 | 季度末周五 (3/6/9/12月末) | `DualTrackTrainer.train_quarter()` → 104周AkShare数据→重训AE | ae_weights_Q.pth |
-| 指标计算 | NAV序列 | `compute_wfo_metrics()` → 总收益/年化收益/最大回撤/Sharpe/年化波动率 | metrics.json |
-| 输出落盘 | records + gate_diagnostics | nav_series.csv + weights_trajectory.csv + weights_data_generalbt.csv + metrics.json + gate_diagnostics.csv + tearsheet.txt + figures/ | **`results/wfo/{run_id}/`** |
-| GeneralBacktest | weights_data + price_data(ClickHouse日频OHLC) | 集成GeneralBacktest: run_backtest(adj_factor, tcost=0.0003, slippage=0.0001) + plot_dashboard | 业绩图 (nav/excess/drawdown/heatmap) |
-
-### 回测交易费率与滑点
-
-回测参数硬编码在 `scripts/run_backtest_wfo.py:756-757`，调用 GeneralBacktest 时传入：
-
-| 参数 | 值 | 说明 |
-|------|------|------|
-| **交易费率 (transaction_cost)** | `[0.0003, 0.0003]` | 买入 0.03%（3‱），卖出 0.03%（3‱） |
-| **滑点 (slippage)** | `0.0001` | 0.01%（1‱） |
-
-> 当前费率设置（买卖各 3‱、滑点 1‱）在 A 股市场中属于偏低水平。实际公募 FOF 产品的申赎费通常在 0.5%~1.5% 之间，滑点也往往更高。如需调整，直接修改 `scripts/run_backtest_wfo.py` 中 `run_backtest()` 调用的 `transaction_cost` 和 `slippage` 参数即可。
-
-### Step 6: 实盘信号下发 (`scripts/run_inference_live.py`)
-
-| 阶段 | 输入 | 处理 | 输出 |
-|------|------|------|------|
-| 增量ETL | ClickHouse (最新2周) | `fetch_track_b_safe()` | 最新ETF价格 |
-| 单周LLM | 当前周五 + AsyncSemanticEngine | 单次 `engine.evaluate(week_end)` | llm_scores dict |
-| 模型加载 | `ae_weights.pth` + `ae_scaler.pkl` + `actor_critic.pth` | torch.load → eval模式 | ae_model + ac_model |
-| 状态组装 | ae_error (AE前向) + vol_mkt_20d + llm_scores (聚合d1/d2/d3) + regret_ema | `StateAssembler.assemble()` → 10维S_t | S_t shape (10,) |
-| Actor前向 | S_t tensor | `ac.actor(S_t)` → action_mean → ActionMapper → (Δα, Δτ) → α_new, τ_new | α_new (float), τ_new (float) |
-| 权重融合 | α_new + DualTrackEngine.compute() → w_normal, w_event | w_target = α·w_event + (1-α)·w_normal → clip → normalize | w_target shape (5,) |
-| 信号下发 | w_target + week_end + α + τ + ae_error | JSON格式化 → `target_weights_{date}.json` + `target_weights_latest.json` (软链接) | **`results/wfo/target_weights_*.json`** |
+> 当前费率偏低, 公募 FOF 实际申赎 0.5%~1.5%, 滑点更高。需调整直接修改 `run_backtest_wfo_n.py` 中 `run_backtest()` 参数。

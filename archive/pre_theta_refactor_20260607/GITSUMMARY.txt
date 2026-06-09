@@ -1,0 +1,38 @@
+# Git state at backup time: 2026-06-07 17:53:07
+
+## Status
+ M config.yaml
+ M scripts/run_backtest_wfo.py
+ M src/compute/dual_track_engine.py
+ M src/compute/event_track.py
+ M src/compute/normal_track.py
+ M src/env/reward_function.py
+ M tests/test_event_track_prototypes.py
+?? archive/
+?? docs/strategy_details.md
+?? results/stage4_validation.csv
+?? results/v3_1_vs_v3_vs_v2_vs_v1_verification.csv
+?? results/wfo/20260602_182649/
+?? results/wfo/stage5_v3/
+?? results/wfo/stage5_v3_1/
+?? results/wfo/stage6_v3/
+?? results/wfo/stage6_v3_1/
+?? scripts/backfill_metrics_real.py
+?? src/compute/event_track_v2.py
+?? src/compute/event_track_v3.py
+?? src/compute/event_track_v3_1.py
+?? tests/test_event_track_v3.py
+?? tests/test_event_track_v3_1.py
+?? tests/test_ml_stage1_fix.py
+?? verify_stage4.py
+?? verify_stage5.py
+?? verify_stage6.py
+?? verify_v3_1_vs_v3_vs_v2_vs_v1.py
+
+## Recent commits
+eb225ac docs: 补充 AE 风向标 ETF 设计说明
+3599d29 docs: 在流水线章节开头补充三层解耦设计简述
+d9be552 docs: 补充回测交易费率/滑点说明及奖励函数变量定义
+9ec9de4 Update README.md
+d75ebe8 Update README.md
+497d7d4 AE_LLM_RL_FOF: 三层解耦 FOF 智能体工作流

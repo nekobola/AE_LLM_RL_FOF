@@ -1,0 +1,9 @@
+{
+  "total_return": 0.304879243902485,
+  "annualized_return": 0.08377683771906907,
+  "max_drawdown": -0.1351078993662882,
+  "sharpe_ratio": 0.7748971424079478,
+  "volatility_annual": 0.11182640285957351,
+  "n_weeks": 172,
+  "_source": "synthetic_nav_from_zscored_features"
+}

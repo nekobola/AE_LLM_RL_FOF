@@ -5,11 +5,14 @@ Track B: quantchdb / ClickHouse ETF data fetcher
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime
 from typing import List, Dict, Optional, Union
 
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 
 # ClickHouse etf_day 中的 ETF 代码（无交易所后缀）
@@ -166,6 +169,113 @@ def fetch_track_b_safe(
         import warnings
         warnings.warn(f"Track B data fetch failed: {e}", RuntimeWarning)
         return pd.DataFrame()
+
+
+# ── Stage 7c: 8-ETF fetcher ──────────────────────────────────────────
+# 8 ETF codes, no CODE_MAP (use raw Symbol)
+N_ETF_CODES: List[str] = [
+    "511010",  # 国债 ETF
+    "518880",  # 黄金 ETF
+    "511020",  # 信用债 ETF
+    "159985",  # 商品 ETF
+    "512100",  # 中证1000 ETF
+    "515050",  # 红利低波 ETF
+    "159915",  # 创业板 ETF (Phase 2 替换 159919, 行业分散 + 更高 Sharpe)
+    "510300",  # 沪深300 ETF
+]
+
+
+def fetch_n_etf(
+    start_date: str,
+    end_date: Optional[str] = None,
+    db_config: Optional[Dict] = None,
+    columns: List[str] = ["open", "close", "adj_factor"],
+) -> pd.DataFrame:
+    """Fetch 8-ETF OHLC + adj_factor from UNION of etf.etf_daily + etf.etf_day.
+
+    - etf.etf_daily: 2021-01 ~ 2025-10-21 (10024 rows for 8 ETFs)
+    - etf.etf_day:   2025-10-22 ~ 2026-04-30 (~800 rows for 8 ETFs)
+    - Combined: full 5+ years coverage.
+    """
+    if end_date is None:
+        end_date = datetime.today().strftime("%Y-%m-%d")
+    if db_config is None:
+        db_config = _get_db_config()
+
+    try:
+        from quantchdb import ClickHouseDatabase
+    except ImportError:
+        raise ImportError("quantchdb is required")
+
+    db = ClickHouseDatabase(config=db_config, terminal_log=False, file_log=False)
+
+    codes_str = ", ".join(f"'{c}'" for c in N_ETF_CODES)
+    col_map_daily = {
+        "open": "OpenPrice",
+        "close": "ClosePrice",
+        "adj_factor": "LatestClosePrice",
+    }
+    # etf_daily 用 AS 别名统一, etf_day 用原列名 (lower-case open/close/adj_factor)
+    cols_str_daily = ", ".join(col_map_daily.get(c, c) for c in columns)
+    cols_str_day = ", ".join(columns)  # etf_day columns already match
+
+    # Source 1: etf.etf_daily (2021-01 ~ 2025-10-21, best backfill)
+    sql_daily = f"""
+        SELECT
+            TradingDate AS date,
+            Symbol AS code,
+            {cols_str_daily}
+        FROM etf.etf_daily
+        WHERE TradingDate >= '{start_date}'
+          AND TradingDate <= '{end_date}'
+          AND Symbol IN ({codes_str})
+    """
+    # Source 2: etf.etf_day (2025-10-22 ~ 2026+, has 2026 data, lower-case cols)
+    sql_day = f"""
+        SELECT
+            date AS date,
+            code AS code,
+            {cols_str_day}
+        FROM etf.etf_day
+        WHERE date >= '{start_date}'
+          AND date <= '{end_date}'
+          AND code IN ({codes_str})
+    """
+    dfs = []
+    for sql, label in [(sql_daily, 'etf_daily'), (sql_day, 'etf_day')]:
+        try:
+            df_part = db.fetch(sql)
+            if df_part is not None and not df_part.empty:
+                dfs.append(df_part)
+        except Exception as e:
+            log.warning(f"fetch_n_etf: {label} query failed: {e}")
+
+    if not dfs:
+        return pd.DataFrame()
+
+    df = pd.concat(dfs, ignore_index=True)
+    df["date"] = pd.to_datetime(df["date"])
+    # Rename etf_daily cols (OpenPrice, ClosePrice, LatestClosePrice) to lower-case to match etf_day
+    rename_map = {
+        "OpenPrice": "open",
+        "ClosePrice": "close",
+        "LatestClosePrice": "adj_factor",
+    }
+    df = df.rename(columns=rename_map)
+    # Now cols may be duplicated. Coalesce each col by combining first non-NaN across duplicates
+    if df.columns.duplicated().any():
+        # Take the first occurrence of each col name (etf_daily 主源, 已在前)
+        df = df.T.groupby(lambda x: x).first().T
+    for col in ["open", "close", "adj_factor"]:
+        if col in df.columns:
+            series = df[col]
+            if hasattr(series, 'ndim') and series.ndim == 1:
+                df[col] = pd.to_numeric(series, errors="coerce")
+    drop_subset = ["date", "code"] + [c for c in ["open", "close", "adj_factor"] if c in df.columns]
+    df = df.dropna(subset=drop_subset)
+    df = df.drop_duplicates(subset=["date", "code"], keep="first")
+    df = df.sort_values(["date", "code"]).reset_index(drop=True)
+    return df
 
 
 if __name__ == "__main__":

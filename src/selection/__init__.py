@@ -1,22 +1,9 @@
-"""Selection module: asymmetric expansion dimensionality filtering for FOF portfolio construction."""
+"""Selection module: 8-ETF selector (Stage 7c) driven by LLM signals."""
 
-from .asymmetric_argmax import AsymmetricSelector
-from .clickhouse_hard_clip import ETFSelector
-from .concept_to_etf_map import (
-    DEFAULT_ETF_POOLS,
-    CONCEPT_CATEGORY_MAP,
-    get_etf_pool_by_concept,
-    get_concepts_by_category,
-)
-from .slot_weighting import P_VECTORS, compute_slot_score
+from .select_8_n import Select8N, ETF_POOL_8, fallback_8_etf_scores
 
 __all__ = [
-    "AsymmetricSelector",
-    "ETFSelector",
-    "DEFAULT_ETF_POOLS",
-    "CONCEPT_CATEGORY_MAP",
-    "P_VECTORS",
-    "compute_slot_score",
-    "get_etf_pool_by_concept",
-    "get_concepts_by_category",
+    "Select8N",
+    "ETF_POOL_8",
+    "fallback_8_etf_scores",
 ]
